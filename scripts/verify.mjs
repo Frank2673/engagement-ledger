@@ -28,6 +28,8 @@ import { checkTables } from './check-report-tables.mjs';
 import { appendEntry } from '../src/lib/ledger.mjs';
 import { intakeAuthorization } from './intake-authorization.mjs';
 import { computeEntryHash, GENESIS_HASH } from '../src/lib/crypto.mjs';
+import { compareReportToDocument, hashFile } from './verify-report.mjs';
+import { buildPdf, looksLikeValidPdf } from './make-test-pdf.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -709,6 +711,67 @@ try {
       assert.equal(bad.code, 0, 'init 仍应成功（核验是告警不是阻断）');
       assert.match(bad.stdout, /授权文件核验未通过/);
       assert.match(bad.stdout, /不一致/);
+    } finally {
+      S.cleanup();
+    }
+  });
+  check(`C${BAD_MANIFESTS.length + 4} 真实 PDF 走通「归档 → 报告 → 客户复核」全流程`, () => {
+    const S = makeEngagement('c9');
+    try {
+      /* 1. 造一份结构完整的真 PDF（不是改后缀的文本） */
+      const pdfPath = join(S.dir, 'AUTH-2026-DEMO-001.pdf');
+      const pdfBuffer = buildPdf({ pages: 3 });
+      writeFileSync(pdfPath, pdfBuffer);
+      assert.equal(looksLikeValidPdf(pdfBuffer), true, '夹具必须是结构完整的 PDF');
+
+      /* 2. 执行人：归档 + 拿哈希 */
+      const intake = intakeAuthorization({
+        source: pdfPath, dir: 'authorization', as: 'AUTH-2026-DEMO-001.pdf', cwd: S.dir,
+      });
+      assert.equal(intake.ok, true, `归档应成功：${intake.error}`);
+
+      /* 3. 填凭证（含证据强制策略），init 核验 */
+      const m = JSON.parse(readFileSync(S.manifest, 'utf8'));
+      m.engagement.authorization.document = intake.relativePath;
+      m.engagement.authorization.documentSha256 = intake.sha256;
+      m.engagement.requireEvidence = true;
+      writeFileSync(S.manifest, JSON.stringify(m), 'utf8');
+
+      const init = runCli(['init', '--manifest', S.manifest, '--ledger', S.ledger]);
+      assert.equal(init.code, 0, init.stderr);
+      assert.match(init.stdout, /授权文件核验通过/);
+
+      /* 4. 记一条带证据的动作，出报告 */
+      runCli(['log', '--manifest', S.manifest, '--ledger', S.ledger,
+        '--target', 'api.example.com', '--action', 'recon', '--result', '12 endpoints',
+        '--evidence', 'logs/recon-001.txt', '--at', AT]);
+
+      const reportPath = join(S.dir, 'compliance-report.md');
+      const report = runCli(['report', '--manifest', S.manifest, '--ledger', S.ledger,
+        '--out', reportPath, '--json', join(S.dir, 'report.json')]);
+      assert.equal(report.code, 0, report.stdout);
+
+      /* 5. 客户侧：拿报告 + 自己的原件复核 */
+      const reportText = readFileSync(reportPath, 'utf8');
+      const same = compareReportToDocument(reportText, hashFile(pdfPath));
+      assert.equal(same.ok, true, '同一份文件必须判为一致');
+      assert.equal(same.engagementId, 'ENG-2026-DEMO-001');
+      assert.equal(same.reference, 'AUTH-2026-DEMO-001');
+
+      /* 6. 客户手上若是被换过的版本（改 1 bit），必须判为不一致 */
+      const tampered = Buffer.from(pdfBuffer);
+      tampered[60] ^= 0x01;
+      const tamperedPath = join(S.dir, 'swapped.pdf');
+      writeFileSync(tamperedPath, tampered);
+
+      const different = compareReportToDocument(reportText, hashFile(tamperedPath));
+      assert.equal(different.ok, false, '改 1 bit 必须判为不一致');
+      assert.equal(different.status, 'mismatch');
+
+      /* 7. JSON 报告路径同样可用（供客户的系统消费） */
+      const jsonReport = readFileSync(join(S.dir, 'report.json'), 'utf8');
+      assert.equal(compareReportToDocument(jsonReport, hashFile(pdfPath)).ok, true);
+      assert.equal(compareReportToDocument(jsonReport, hashFile(tamperedPath)).ok, false);
     } finally {
       S.cleanup();
     }

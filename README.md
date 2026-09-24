@@ -10,7 +10,7 @@
 
 [![CI](https://github.com/Frank2673/engagement-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/Frank2673/engagement-ledger/actions/workflows/ci.yml)
 ![零依赖](https://img.shields.io/badge/运行时依赖-0-brightgreen)
-![测试](https://img.shields.io/badge/测试-240%20passed-brightgreen)
+![测试](https://img.shields.io/badge/测试-255%20passed-brightgreen)
 ![Node](https://img.shields.io/badge/node-%3E%3D20-blue)
 
 ---
@@ -408,6 +408,34 @@ node src/index.mjs log --target api.example.com --action scan \
 
 ---
 
+## 交付与复核：让客户能自己验，而不是相信你
+
+报告交出去之后，客户手里应该有一条能跑的命令：
+
+```bash
+node scripts/verify-report.mjs compliance-report.md "D:\授权\AUTH-2026-001.pdf"
+#  ✅ 一致         → 退出码 0
+#  ❌ 不一致       → 退出码 3，并给出排查顺序
+```
+
+它从报告里抽出登记的授权书 SHA-256，对客户手上的原件算一遍，比对后给结论。
+Markdown 报告与 `--json` 报告都能解析；`--json` 输出供客户的系统消费。
+
+**为什么不只告诉客户"用 Get-FileHash 算一下"**：让人肉眼比对 64 位十六进制，
+成功率约等于零 —— 结果是复核环节变成走过场，或者抄错一位后误判。
+把复核压缩成"看退出码"，这件事才会真的被执行。
+
+交付前建议按这个顺序走一遍（每一步都有退出码可判）：
+
+```bash
+node src/index.mjs verify           --ledger ledger.jsonl                    # 链完整性 + 委托归属
+node src/index.mjs verify-anchor    --ledger ledger.jsonl --anchors ANCHORS.txt  # 是否被整链重写
+node src/index.mjs report           --manifest engagement.json --ledger ledger.jsonl --json report.json
+node scripts/verify-report.mjs report.json authorization/AUTH-2026-001.pdf    # 客户视角复核
+```
+
+---
+
 ## 项目结构
 
 ```
@@ -419,9 +447,11 @@ src/
     gate.mjs             执行前校验门（7 项判定 + 完整轨迹）
     ledger.mjs           哈希链日志：追加、校验、锚定信息、委托归属校验
     report.mjs           合规报告（Markdown + JSON）
-tests/                   240 个测试，9 个文件
+tests/                   255 个测试，10 个文件
 scripts/
-  verify.mjs                  运营级校验：本地与 CI 跑同一份代码（39 项）
+  verify.mjs                  运营级校验：本地与 CI 跑同一份代码（40 项）
+  verify-report.mjs           客户侧复核：拿报告 + 授权书原件，核对是否对应
+  make-test-pdf.mjs           生成结构完整的真 PDF 作测试夹具（非二进制入库）
   intake-authorization.mjs    授权书归档 + 算哈希 + 生成凭证片段
   check-zero-deps.mjs         零依赖 + 安全红线校验（CI 强制）
   check-report-tables.mjs     报告表格结构校验
@@ -447,12 +477,12 @@ fixtures/                示例凭证与示例授权书（虚构数据）
 
 ```bash
 npm test                                    # 单元测试：node --test tests/
-node scripts/verify.mjs                     # 运营级校验：39 项，含负向验证
+node scripts/verify.mjs                     # 运营级校验：40 项，含负向验证
 npm run check                               # 上面全部 + 零依赖红线
 node tests/cli.test.mjs                     # 单跑某个文件
 ```
 
-240 个单元测试，重点覆盖的不是"能存能读"，而是**篡改能不能被发现**：
+255 个单元测试，重点覆盖的不是"能存能读"，而是**篡改能不能被发现**：
 
 - 改内容 / 改时间 / 删中间条 / 换顺序 / 改 prevHash —— 逐项验证能检出并定位
 - **负向验证**：纯哈希链下"整链重算"确实能伪造成功（承认边界），
@@ -465,7 +495,7 @@ node tests/cli.test.mjs                     # 单跑某个文件
 - 窗口合规：窗口前 / 窗口后的动作都被找出，边界时刻（起止）不算越窗，`note` 不算
 - 输入加固：目标名含 `|` 时报告表格不被撑破，由 `check-report-tables.mjs` 校验
 
-`scripts/verify.mjs` 是运营级校验，四组共 39 项：端到端闭环、篡改检测与归属、
+`scripts/verify.mjs` 是运营级校验，四组共 40 项：端到端闭环、篡改检测与归属、
 授权凭证守卫、安全红线。它的设计本身值得说一句 ——
 
 ### 为什么校验逻辑不写在 workflow 的 bash 里
