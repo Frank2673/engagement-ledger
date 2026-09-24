@@ -22,6 +22,8 @@ export function summarizeLedger(entries) {
     byType: {},
     decisions: { allowed: 0, denied: 0 },
     deniedActions: [],
+    /* 动作流水：客户最想看的其实不是统计数字，而是"到底做了哪些事" */
+    timeline: [],
     targetsTouched: [],
     /* 补录记录数：事件时间与写入时间相差较大的条目 */
     backfilledCount: 0,
@@ -46,6 +48,23 @@ export function summarizeLedger(entries) {
         reason: entry.reason,
       });
     }
+
+    /* 已执行的动作与人工备注进流水；被拒的尝试单独成表（第 4 章） */
+    if (entry.type === 'action' || entry.type === 'note') {
+      stats.timeline.push({
+        seq: entry.seq,
+        timestamp: entry.timestamp,
+        recordedAt: entry.recordedAt || null,
+        actor: entry.actor,
+        type: entry.type,
+        action: entry.action || null,
+        target: entry.target || null,
+        result: entry.result || null,
+        evidence: entry.evidence || null,
+        backfilled: Boolean(entry.backfilled),
+      });
+    }
+
     if (entry.target) targets.add(entry.target);
   }
 
@@ -151,6 +170,45 @@ export function buildReport({ manifest, entries, hmacKey = null }) {
     p();
     for (const t of stats.targetsTouched) p(`- \`${t}\``);
     p();
+  }
+
+  /* ---- 3.2 动作流水：客户最想看的其实不是统计，而是"到底做了哪些事" ---- */
+  p(`### 3.2 动作流水`);
+  p();
+  if (stats.timeline.length === 0) {
+    p(`本次委托尚未记录任何已执行的动作。`);
+    p();
+  } else {
+    p(`按**写入顺序**列出全部已执行动作与人工备注。这是本报告的核心内容：授权范围说明"允许做什么"，本表说明"实际做了什么"。`);
+    p();
+    p(`| # | 事件时间 | 执行人 | 动作 | 目标 | 结果 | 证据 |`);
+    p(`| --- | --- | --- | --- | --- | --- | --- |`);
+    for (const a of stats.timeline) {
+      const time = escapeCell(fmt(a.timestamp)) + (a.backfilled ? ' ⚠️' : '');
+      const action = a.type === 'note' ? '（备注）' : `\`${escapeCell(a.action || '?')}\``;
+      p(
+        `| ${a.seq} | ${time} | ${escapeCell(a.actor)} | ${action} | ` +
+          `${a.target ? `\`${escapeCell(a.target)}\`` : '—'} | ${escapeCell(a.result || '—')} | ` +
+          `${a.evidence ? `\`${escapeCell(a.evidence)}\`` : '—'} |`
+      );
+    }
+    p();
+    if (stats.backfilledCount > 0) {
+      p(`> ⚠️ 标记表示该条为补录（事件时间与写入时间相差超过 5 分钟）。`);
+      p();
+    }
+    if (stats.timeline.some((a) => a.type === 'note')) {
+      p(`> 「（备注）」条目是人工记录的范围变更、与客户确认等事件，不对应具体测试动作。`);
+      p();
+    }
+    const withoutEvidence = stats.timeline.filter((a) => a.type === 'action' && !a.evidence);
+    if (withoutEvidence.length > 0) {
+      p(
+        `> 提示：${withoutEvidence.length} 条动作未附证据指针（\`--evidence\`）。` +
+          `证据（命令输出、截图路径）的存在与否，决定这条记录能否被独立复核。`
+      );
+      p();
+    }
   }
 
   /* ---- 4. 越界尝试（纪律证明）---- */

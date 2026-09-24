@@ -93,6 +93,96 @@ test('被拒记录带出拒绝原因（报告要能解释为什么拒）', () =>
   assert.match(stats.deniedActions[0].reason, /排除规则/);
 });
 
+/* ------------------------- 动作流水 ------------------------- */
+
+test('summarizeLedger 收集已执行动作进流水（不含 genesis 与被拒）', () => {
+  const stats = summarizeLedger(entries());
+
+  assert.equal(stats.timeline.length, 2, '应只有两条已执行动作');
+  assert.deepEqual(stats.timeline.map((a) => a.action), ['recon', 'scan']);
+  assert.deepEqual(stats.timeline.map((a) => a.target), ['api.example.com', 'staging.example.com']);
+  assert.equal(stats.timeline.every((a) => a.type === 'action'), true);
+});
+
+test('流水条目带出执行人、结果与证据指针', () => {
+  const list = entries();
+  const { hash, ...rest } = list[1];
+  const withEvidence = reseal([...list.slice(0, 1), { ...rest, evidence: 'logs/recon-001.txt' }, list[2], list[3]]);
+
+  const first = summarizeLedger(withEvidence).timeline[0];
+  assert.equal(first.actor, 'alice');
+  assert.equal(first.result, '12 endpoints');
+  assert.equal(first.evidence, 'logs/recon-001.txt');
+});
+
+test('备注条目也进流水，但不冒充测试动作', () => {
+  const list = entries();
+  list.push(makeEntry({ seq: 4, type: 'note', actor: 'alice', reason: '与甲方确认：支付系统不测', timestamp: '2026-09-02T13:00:00.000Z' }));
+  const rebuilt = reseal(list);
+
+  const stats = summarizeLedger(rebuilt);
+  assert.equal(stats.timeline.length, 3);
+  assert.equal(stats.timeline.at(-1).type, 'note');
+  assert.equal(stats.timeline.at(-1).action, null);
+});
+
+test('报告含动作流水一节，列出每个动作与证据', () => {
+  const list = entries();
+  list[1].evidence = 'logs/recon-001.txt';
+  const md = buildReport({ manifest: manifest(), entries: reseal(list) });
+
+  assert.ok(md.includes('### 3.2 动作流水'));
+  assert.ok(md.includes('| # | 事件时间 | 执行人 | 动作 | 目标 | 结果 | 证据 |'));
+  assert.ok(md.includes('`recon`'));
+  assert.ok(md.includes('`api.example.com`'));
+  assert.ok(md.includes('12 endpoints'));
+  assert.ok(md.includes('`logs/recon-001.txt`'));
+  /* 被拒的尝试不应混进流水（它属于第 4 章） */
+  const timelineStart = md.indexOf('### 3.2 动作流水');
+  const chapter4 = md.indexOf('## 4. 越界尝试与被拒记录');
+  assert.ok(timelineStart < chapter4);
+  assert.ok(!md.slice(timelineStart, chapter4).includes('pay.example.com'));
+});
+
+test('有动作缺证据指针时给出提示（证据决定能否独立复核）', () => {
+  const md = buildReport({ manifest: manifest(), entries: entries() });
+  assert.ok(md.includes('未附证据指针'));
+  assert.match(md, /决定这条记录能否被独立复核/);
+});
+
+test('全部动作都带证据时不出现缺证据提示', () => {
+  const list = entries();
+  list[1].evidence = 'a.txt';
+  list[2].evidence = 'b.txt';
+  const md = buildReport({ manifest: manifest(), entries: reseal(list) });
+
+  assert.ok(!md.includes('未附证据指针'));
+});
+
+test('补录条目在流水里带 ⚠️ 标记', () => {
+  const list = entries();
+  list[1].backfilled = true;
+  const md = buildReport({ manifest: manifest(), entries: reseal(list) });
+
+  assert.ok(md.includes('⚠️'));
+  assert.ok(md.includes('标记表示该条为补录'));
+});
+
+test('没有任何已执行动作时报告给出说明而不是空表', () => {
+  const only = entries().filter((e) => e.type === 'genesis' || e.decision === 'denied');
+  const md = buildReport({ manifest: manifest(), entries: reseal(only) });
+
+  assert.ok(md.includes('尚未记录任何已执行的动作'));
+  assert.ok(!md.includes('| # | 事件时间 | 执行人 | 动作 | 目标 | 结果 | 证据 |'));
+});
+
+test('动作流水进 JSON 报告，可供下游系统消费', () => {
+  const json = buildJsonReport({ manifest: manifest(), entries: entries() });
+  assert.equal(json.statistics.timeline.length, 2);
+  assert.equal(json.statistics.timeline[0].action, 'recon');
+  assert.doesNotThrow(() => JSON.parse(JSON.stringify(json)));
+});
+
 /* ------------------------- Markdown 报告 ------------------------- */
 
 test('报告包含七个必备章节', () => {

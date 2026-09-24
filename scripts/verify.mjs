@@ -113,13 +113,15 @@ check('A1 用凭证初始化日志，并核验授权书未被替换', () => {
 
 check('A2 范围内的动作放行（退出码 0）', () => {
   const r = runCli(['log', '--manifest', A.manifest, '--ledger', A.ledger,
-    '--target', 'api.example.com', '--action', 'recon', '--result', '12 endpoints', '--at', AT]);
+    '--target', 'api.example.com', '--action', 'recon', '--result', '12 endpoints',
+    '--evidence', 'logs/recon-001.txt', '--at', AT]);
   assert.equal(r.code, 0, `应放行，实际退出码 ${r.code}\n${r.stdout}`);
   assert.match(r.stdout, /✅ 允许执行/);
 
   const last = logLines(A.ledger).at(-1);
   assert.equal(last.decision, 'allowed');
   assert.equal(last.type, 'action');
+  assert.equal(last.evidence, 'logs/recon-001.txt');
   assert.ok(Array.isArray(last.checks) && last.checks.length === 7, '判定轨迹应一并入库');
 });
 
@@ -170,8 +172,9 @@ check('A8 合规报告内容齐全且表格结构一致', () => {
   assert.equal(r.code, 0, r.stdout);
 
   const md = readFileSync(out, 'utf8');
-  for (const needle of ['# 授权测试合规报告', '越界尝试与被拒记录', 'pay.example.com',
-    '✅ 哈希链完整', '篡改可发现 ≠ 不可伪造', '外部锚定', '边界声明', 'AUTH-2026-DEMO-001']) {
+  for (const needle of ['# 授权测试合规报告', '### 3.2 动作流水', '越界尝试与被拒记录',
+    'pay.example.com', 'logs/recon-001.txt', '✅ 哈希链完整',
+    '篡改可发现 ≠ 不可伪造', '外部锚定', '边界声明', 'AUTH-2026-DEMO-001']) {
     assert.ok(md.includes(needle), `报告缺少：${needle}`);
   }
   /* 报告里绝不能出现 undefined —— 那意味着某个字段没被规范化 */

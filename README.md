@@ -10,7 +10,7 @@
 
 [![CI](https://github.com/Frank2673/engagement-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/Frank2673/engagement-ledger/actions/workflows/ci.yml)
 ![零依赖](https://img.shields.io/badge/运行时依赖-0-brightgreen)
-![测试](https://img.shields.io/badge/测试-145%20passed-brightgreen)
+![测试](https://img.shields.io/badge/测试-154%20passed-brightgreen)
 ![Node](https://img.shields.io/badge/node-%3E%3D20-blue)
 
 ---
@@ -268,10 +268,33 @@ node src/index.mjs verify --ledger ledger.jsonl --hmac-key-env ENGAGEMENT_LEDGER
 1. **委托与授权** —— 编号、签署人、窗口、授权书 SHA-256（附复核方法）
 2. **授权范围** —— 纳入、排除、允许动作、禁止动作、系统硬性禁止
 3. **执行记录统计** —— 条数、允许/拒绝数、涉及目标、补录记录数
+   - **3.1 涉及的目标**
+   - **3.2 动作流水** —— 按写入顺序列出全部已执行动作与人工备注
 4. **越界尝试与被拒记录** —— 单独成表，**这是纪律的证据**
 5. **日志完整性** —— 链校验结论 + 链头哈希
 6. **外部锚定** —— 为什么要锚定、锚定行、如何操作
 7. **边界声明** —— 三项能力限制，不做过度承诺
+
+第 3.2 节是报告的核心：**授权范围说明「允许做什么」，动作流水说明「实际做了什么」**。
+只给范围和统计数字，审计方无法回答"到底测了哪些资产、各自做了什么、结果是什么"。
+
+```markdown
+### 3.2 动作流水
+
+| # | 事件时间 | 执行人 | 动作 | 目标 | 结果 | 证据 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 2026-09-15 10:00:00 UTC ⚠️ | Frank | `recon` | `api.example.com` | 12 endpoints | `logs/recon-001.txt` |
+| 2 | 2026-09-15 10:30:00 UTC ⚠️ | Frank | `scan` | `staging.example.com` | 3 findings | `logs/scan-staging.txt` |
+| 3 | 2026-09-15 10:45:00 UTC ⚠️ | Frank | `manual-test` | `192.0.2.5` | confirmed | — |
+
+> ⚠️ 标记表示该条为补录（事件时间与写入时间相差超过 5 分钟）。
+
+> 提示：1 条动作未附证据指针（`--evidence`）。证据（命令输出、截图路径）的存在与否，
+> 决定这条记录能否被独立复核。
+```
+
+两处细节是有意的：**缺证据会被告警**（记录能否被独立复核取决于有没有证据指针），
+**补录条目会被标记**（追加写的日志只能证明写入顺序）。
 
 配合 `--json` 还能产出机器可读版本，供 CI 或客户的合规系统消费。
 
@@ -288,7 +311,7 @@ src/
     gate.mjs             执行前校验门（7 项判定 + 完整轨迹）
     ledger.mjs           哈希链日志：追加、校验、锚定信息
     report.mjs           合规报告（Markdown + JSON）
-tests/                   145 个测试，7 个文件
+tests/                   154 个测试，7 个文件
 scripts/
   verify.mjs                  运营级校验：本地与 CI 跑同一份代码（28 项）
   check-zero-deps.mjs         零依赖 + 安全红线校验（CI 强制）
@@ -318,7 +341,7 @@ npm run check                               # 上面全部 + 零依赖红线
 node tests/cli.test.mjs                     # 单跑某个文件
 ```
 
-145 个单元测试，重点覆盖的不是"能存能读"，而是**篡改能不能被发现**：
+154 个单元测试，重点覆盖的不是"能存能读"，而是**篡改能不能被发现**：
 
 - 改内容 / 改时间 / 删中间条 / 换顺序 / 改 prevHash —— 逐项验证能检出并定位
 - **负向验证**：纯哈希链下"整链重算"确实能伪造成功（承认边界），
