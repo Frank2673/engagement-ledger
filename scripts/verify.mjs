@@ -26,6 +26,7 @@ import { main } from '../src/index.mjs';
 import { runChecks, DEFAULT_ROOT } from './check-zero-deps.mjs';
 import { checkTables } from './check-report-tables.mjs';
 import { appendEntry } from '../src/lib/ledger.mjs';
+import { intakeAuthorization } from './intake-authorization.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -495,6 +496,91 @@ try {
       assert.equal(r.code, 0, 'init 不应因此失败');
       assert.match(r.stdout, /授权文件核验未通过/);
       assert.match(r.stdout, /不一致/);
+    } finally {
+      S.cleanup();
+    }
+  });
+
+  check(`C${BAD_MANIFESTS.length + 2} 证据强制策略：缺证据拒绝记录、被拒动作不受影响`, () => {
+    const S = makeEngagement('c7');
+    try {
+      const m = JSON.parse(readFileSync(S.manifest, 'utf8'));
+      m.engagement.requireEvidence = true;
+      writeFileSync(S.manifest, JSON.stringify(m), 'utf8');
+
+      runCli(['init', '--manifest', S.manifest, '--ledger', S.ledger]);
+
+      /* 放行但缺证据 → 拒绝写盘 */
+      const before = readFileSync(S.ledger, 'utf8');
+      const blocked = runCli(['log', '--manifest', S.manifest, '--ledger', S.ledger,
+        '--target', 'api.example.com', '--action', 'recon', '--at', AT]);
+      assert.equal(blocked.code, 1, `缺证据应被拒，实际 ${blocked.code}`);
+      assert.match(blocked.stderr, /要求每个已执行动作都附证据/);
+      assert.equal(readFileSync(S.ledger, 'utf8'), before, '策略不满足时不得写入');
+
+      /* 带证据 → 正常放行 */
+      const ok = runCli(['log', '--manifest', S.manifest, '--ledger', S.ledger,
+        '--target', 'api.example.com', '--action', 'recon', '--evidence', 'logs/recon.txt', '--at', AT]);
+      assert.equal(ok.code, 0, `带证据应放行，实际 ${ok.code}`);
+
+      /* 被拒的动作不需要证据（否则会逼人给"没发生的事"造凭据） */
+      const denied = runCli(['log', '--manifest', S.manifest, '--ledger', S.ledger,
+        '--target', 'pay.example.com', '--action', 'scan', '--at', AT]);
+      assert.equal(denied.code, 2, `越界动作应记为拒绝，实际 ${denied.code}`);
+
+      /* 报告要把策略写出来，并指出缺证据条目 */
+      const report = runCli(['report', '--manifest', S.manifest, '--ledger', S.ledger, '--stdout']);
+      assert.equal(report.code, 0);
+      assert.match(report.stdout, /每个已执行动作都必须附证据指针/);
+      assert.match(report.stdout, /logs\/recon\.txt/);
+    } finally {
+      S.cleanup();
+    }
+  });
+
+  check(`C${BAD_MANIFESTS.length + 3} 授权书归档脚本与 init 核验能串成闭环`, () => {
+    const S = makeEngagement('c8');
+    try {
+      /* 1. 用 intake 脚本归档源文件，拿到可直接填进凭证的两行 */
+      const intake = intakeAuthorization({
+        source: join(S.dir, 'demo-authorization.md'),
+        dir: 'authorization',
+        as: 'AUTH-2026-DEMO-001.md',
+        cwd: S.dir,
+      });
+      assert.equal(intake.ok, true, `归档应成功：${intake.error}`);
+      assert.equal(intake.relativePath, 'authorization/AUTH-2026-DEMO-001.md');
+
+      /* 2. 把结果填进凭证（这正是脚本存在的意义：不靠手抄） */
+      const m = JSON.parse(readFileSync(S.manifest, 'utf8'));
+      m.engagement.authorization.document = intake.relativePath;
+      m.engagement.authorization.documentSha256 = intake.sha256;
+      writeFileSync(S.manifest, JSON.stringify(m), 'utf8');
+
+      /* 3. init 必须核验通过 */
+      const ok = runCli(['init', '--manifest', S.manifest, '--ledger', S.ledger]);
+      assert.equal(ok.code, 0, ok.stderr);
+      assert.match(ok.stdout, /授权文件核验通过/);
+
+      /* 4. 重复归档到同名必须被拒（覆盖会作废已登记的哈希） */
+      const again = intakeAuthorization({
+        source: join(S.dir, 'demo-authorization.md'),
+        dir: 'authorization',
+        as: 'AUTH-2026-DEMO-001.md',
+        cwd: S.dir,
+      });
+      assert.equal(again.ok, false, '重复归档到同名必须被拒');
+      assert.match(again.error, /拒绝覆盖/);
+
+      /* 5. 归档副本被动过之后，核验必须报不一致。
+            用同一个沙箱目录下的另一个 ledger —— 凭证里的 document 是相对路径，
+            换到别的目录就会变成"文档不存在"，那是另一种情形，不是这里要验的。 */
+      writeFileSync(join(S.dir, intake.relativePath), '被人替换过的授权书\n', 'utf8');
+      const tamperedLedger = join(S.dir, 'tampered-ledger.jsonl');
+      const bad = runCli(['init', '--manifest', S.manifest, '--ledger', tamperedLedger]);
+      assert.equal(bad.code, 0, 'init 仍应成功（核验是告警不是阻断）');
+      assert.match(bad.stdout, /授权文件核验未通过/);
+      assert.match(bad.stdout, /不一致/);
     } finally {
       S.cleanup();
     }

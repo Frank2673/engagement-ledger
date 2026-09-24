@@ -62,6 +62,9 @@ check / log 选项：
   --result <结果>            log 专用：执行结果，如 ok / 5 findings
   --evidence <证据>          log 专用：证据指针，如 logs/scan-001.txt
   --actor <执行人>           log 专用：执行人（默认取凭证里的 tester）
+  --require-evidence          log 专用：强制本次记录必须附 --evidence，
+                             否则拒绝写入（也可在凭证里设 requireEvidence: true
+                             把它变成整个委托的策略 —— 习惯会忘，策略不会）
 
 report 选项：
   --out <路径>               报告输出路径（默认 compliance-report.md）
@@ -236,6 +239,22 @@ function cmdLog({ manifestPath, ledgerPath, options }) {
     action: options.action,
     at: options.at ? new Date(options.at) : new Date(),
   });
+
+  /* 证据强制策略：只有"放行并执行"的动作才需要证据 ——
+     被拒的动作什么都没做，没有证据可附（要求它反而会逼人造假凭据）。
+     检查放在写盘之前：策略不满足时不留半条记录。 */
+  const evidenceRequired = manifest.engagement.requireEvidence === true || options['require-evidence'] === true;
+  if (evidenceRequired && verdict.allowed && !options.evidence) {
+    printVerdict(verdict);
+    fail(
+      `本次委托要求每个已执行动作都附证据，拒绝记录。\n` +
+        `     缺少：--evidence <证据指针>（命令输出文件、截图路径、报告编号等）\n` +
+        `     来源：${manifest.engagement.requireEvidence === true ? '凭证里的 requireEvidence=true' : '命令行 --require-evidence'}\n` +
+        `     证据指针的存在与否，决定这条记录能否被独立复核；先留下证据再记录。\n` +
+        `     如确无证据可附，请改用 check 做试判（不留痕），或与委托方确认后关闭该策略。`
+    );
+    return EXIT.ERROR;
+  }
 
   /* 注意：拒绝也要入库 —— 被拒绝的尝试证明边界是有效的 */
   const entry = makeEntry({

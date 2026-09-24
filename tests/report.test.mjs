@@ -8,7 +8,7 @@ import { makeEntry, sealEntry } from '../src/lib/ledger.mjs';
 import { summarizeLedger, buildReport, buildJsonReport, findOutOfWindowActions } from '../src/lib/report.mjs';
 import { GENESIS_HASH } from '../src/lib/crypto.mjs';
 
-function manifest() {
+function manifest(extra = {}) {
   return validateManifest({
     engagement: {
       id: 'ENG-001',
@@ -26,6 +26,7 @@ function manifest() {
       permittedActions: ['recon', 'scan'],
       prohibitedActions: ['dos', 'destructive', 'data-exfiltration', 'persistence', 'social-engineering'],
       emergencyContact: 'bob@example.com',
+      ...extra,
     },
   });
 }
@@ -409,6 +410,45 @@ test('JSON 报告带 outOfWindow 字段', () => {
   const clean = buildJsonReport({ manifest: manifest(), entries: entries() });
   assert.equal(clean.outOfWindow.ok, true);
   assert.equal(clean.outOfWindow.count, 0);
+});
+
+/* ------------------------- 证据强制策略 ------------------------- */
+
+test('报告第 1 章写明证据要求（策略开 / 关两种措辞）', () => {
+  const off = buildReport({ manifest: manifest(), entries: entries() });
+  assert.ok(off.includes('| 证据要求 | 未强制'));
+  assert.ok(!off.includes('每个已执行动作都必须附证据指针'));
+
+  const on = buildReport({ manifest: manifest({ requireEvidence: true }), entries: entries() });
+  assert.ok(on.includes('| 证据要求 | **每个已执行动作都必须附证据指针**（凭证级策略） |'));
+});
+
+test('策略开启且存在缺证据条目时给出更强的告警', () => {
+  const md = buildReport({ manifest: manifest({ requireEvidence: true }), entries: entries() });
+
+  assert.ok(md.includes('未附证据指针'));
+  assert.ok(md.includes('本次委托**要求**每个已执行动作都附证据'));
+  assert.ok(md.includes('要么来自策略开启之前，要么是绕过'));
+});
+
+test('策略关闭时只有普通提示，没有"要求"措辞', () => {
+  const md = buildReport({ manifest: manifest(), entries: entries() });
+  assert.ok(md.includes('未附证据指针'));
+  assert.ok(!md.includes('本次委托**要求**每个已执行动作都附证据'));
+});
+
+test('报告写出应急联系人（出事找谁）', () => {
+  const md = buildReport({ manifest: manifest(), entries: entries() });
+  assert.ok(md.includes('| 应急联系人 | bob@example.com |'));
+});
+
+test('JSON 报告暴露 requireEvidence 与应急联系人', () => {
+  const on = buildJsonReport({ manifest: manifest({ requireEvidence: true }), entries: entries() });
+  assert.equal(on.engagement.requireEvidence, true);
+  assert.equal(on.engagement.emergencyContact, 'bob@example.com');
+
+  const off = buildJsonReport({ manifest: manifest(), entries: entries() });
+  assert.equal(off.engagement.requireEvidence, false);
 });
 
 /* ------------------------- 委托归属 ------------------------- */

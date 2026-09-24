@@ -669,6 +669,93 @@ test('窗口内的动作不会触发 4.1 节', () => {
   }
 });
 
+/* ------------------------- 证据强制策略 ------------------------- */
+
+test('--require-evidence：缺证据时拒绝记录，且不留半条记录', () => {
+  const sb = sandbox();
+  try {
+    run(['init', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath]);
+    const before = readFileSync(sb.ledgerPath, 'utf8');
+
+    const r = run(['log', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath,
+      '--target', 'example.com', '--action', 'scan', '--require-evidence', '--at', AT]);
+
+    assert.equal(r.code, 1, `应拒绝，实际 ${r.code}`);
+    assert.match(r.stderr, /要求每个已执行动作都附证据/);
+    assert.match(r.stderr, /--evidence/);
+    assert.match(r.stderr, /命令行 --require-evidence/, '应说明策略来源');
+    assert.equal(readFileSync(sb.ledgerPath, 'utf8'), before, '策略不满足时不得写入');
+  } finally {
+    sb.cleanup();
+  }
+});
+
+test('--require-evidence：带证据时正常记录', () => {
+  const sb = sandbox();
+  try {
+    run(['init', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath]);
+    const r = run(['log', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath,
+      '--target', 'example.com', '--action', 'scan', '--evidence', 'logs/scan.txt',
+      '--require-evidence', '--at', AT]);
+
+    assert.equal(r.code, 0);
+    const last = JSON.parse(readFileSync(sb.ledgerPath, 'utf8').trim().split('\n').at(-1));
+    assert.equal(last.evidence, 'logs/scan.txt');
+  } finally {
+    sb.cleanup();
+  }
+});
+
+test('凭证里的 requireEvidence=true 让策略对整次委托生效', () => {
+  const sb = sandbox();
+  try {
+    const manifest = JSON.parse(readFileSync(sb.manifestPath, 'utf8'));
+    manifest.engagement.requireEvidence = true;
+    writeFileSync(sb.manifestPath, JSON.stringify(manifest), 'utf8');
+
+    run(['init', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath]);
+
+    const noEvidence = run(['log', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath,
+      '--target', 'example.com', '--action', 'scan', '--at', AT]);
+    assert.equal(noEvidence.code, 1, '无需命令行开关即应生效');
+    assert.match(noEvidence.stderr, /凭证里的 requireEvidence=true/);
+  } finally {
+    sb.cleanup();
+  }
+});
+
+test('被拒的动作不需要证据（它什么都没做，要求证据会逼人造假）', () => {
+  const sb = sandbox();
+  try {
+    const manifest = JSON.parse(readFileSync(sb.manifestPath, 'utf8'));
+    manifest.engagement.requireEvidence = true;
+    writeFileSync(sb.manifestPath, JSON.stringify(manifest), 'utf8');
+    run(['init', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath]);
+
+    const r = run(['log', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath,
+      '--target', 'pay.example.com', '--action', 'scan', '--at', AT]);
+
+    assert.equal(r.code, 2, '越界动作应记为拒绝（退出码 2），而不是因缺证据被拦成 1');
+    const last = JSON.parse(readFileSync(sb.ledgerPath, 'utf8').trim().split('\n').at(-1));
+    assert.equal(last.decision, 'denied');
+    assert.equal(last.result, 'not-executed');
+  } finally {
+    sb.cleanup();
+  }
+});
+
+test('策略关闭时缺证据仍可记录（只是报告里会提示）', () => {
+  const sb = sandbox();
+  try {
+    run(['init', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath]);
+    const r = run(['log', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath,
+      '--target', 'example.com', '--action', 'scan', '--at', AT]);
+    assert.equal(r.code, 0);
+  } finally {
+    sb.cleanup();
+  }
+});
+
 /* ------------------------- 参数解析 ------------------------- */
 
 test('--key=value 与 --key value 两种写法都支持', () => {

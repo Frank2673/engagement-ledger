@@ -54,6 +54,17 @@ test('凭证带回硬性禁止清单（报告与校验门共用一份）', () =>
   assert.deepEqual(m.hardForbidden, NEVER_PERMITTED_ACTIONS);
 });
 
+test('requireEvidence 默认为 false，显式 true 时保留', () => {
+  assert.equal(validateManifest(base()).engagement.requireEvidence, false);
+  assert.equal(validateManifest(base({ requireEvidence: true })).engagement.requireEvidence, true);
+});
+
+test('requireEvidence 只认布尔 true（避免字符串 "false" 被当成真）', () => {
+  assert.equal(validateManifest(base({ requireEvidence: 'true' })).engagement.requireEvidence, false);
+  assert.equal(validateManifest(base({ requireEvidence: 1 })).engagement.requireEvidence, false);
+  assert.equal(validateManifest(base({ requireEvidence: false })).engagement.requireEvidence, false);
+});
+
 test('缺少授权段直接报错 —— 没有授权就没有动作', () => {
   const input = base();
   delete input.engagement.authorization;

@@ -12,12 +12,19 @@ evidence/
 compliance-report.md
 report.json
 
-# 授权文件原件：可能含客户真实信息与手写签名，默认不入库。
-# 凭证里只登记它的 SHA-256 —— 那正是为了证明原件没被换过。
+# 授权文件原件与归档副本：可能含客户机密信息与手写签名，默认不入库。
+# 凭证里只登记它的 SHA-256 —— 那正是为了证明原件没被换过：
+# 文件本身不需要共享，哈希照样能被比对。
+# 详见 docs/authorization-intake.md
+authorization/
 authorization.pdf
 authorization.docx
+authorization.msg
+authorization.eml
 授权书*.pdf
 授权书*.docx
+授权书*.msg
+授权书*.eml
 
 # 编辑器与系统
 .vscode/

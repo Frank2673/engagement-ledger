@@ -143,6 +143,8 @@ export function buildReport({ manifest, entries, hmacKey = null }) {
   p(`| 授权签署日期 | ${fmt(eng.authorization.signedAt)} |`);
   p(`| 授权窗口 | ${fmt(eng.window.from)} ~ ${fmt(eng.window.to)} |`);
   p(`| 窗口状态 | ${windowStatus(eng.window, now)} |`);
+  p(`| 证据要求 | ${eng.requireEvidence ? '**每个已执行动作都必须附证据指针**（凭证级策略）' : '未强制（记录中可能有无证据的动作）'} |`);
+  if (eng.emergencyContact) p(`| 应急联系人 | ${eng.emergencyContact} |`);
   p();
   if (eng.authorization.documentSha256) {
     p(`授权文件完整性指纹（SHA-256）：`);
@@ -241,6 +243,13 @@ export function buildReport({ manifest, entries, hmacKey = null }) {
           `证据（命令输出、截图路径）的存在与否，决定这条记录能否被独立复核。`
       );
       p();
+      if (eng.requireEvidence) {
+        p(
+          `> ⚠️ 本次委托**要求**每个已执行动作都附证据。这些缺证据的条目要么来自策略开启之前，` +
+            `要么是绕过 \`log\` 直接写入的 —— 两者都需要说明。`
+        );
+        p();
+      }
     }
   }
 
@@ -401,6 +410,9 @@ export function buildJsonReport({ manifest, entries, hmacKey = null }) {
       permittedActions: manifest.engagement.permittedActions,
       prohibitedActions: manifest.engagement.prohibitedActions,
       hardForbidden: manifest.hardForbidden || [],
+      /* 证据强制策略：下游系统可据此判断"缺证据"是违规还是仅提示 */
+      requireEvidence: manifest.engagement.requireEvidence === true,
+      emergencyContact: manifest.engagement.emergencyContact || null,
     },
     statistics: summarizeLedger(entries),
     integrity: {

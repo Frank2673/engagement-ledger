@@ -10,7 +10,7 @@
 
 [![CI](https://github.com/Frank2673/engagement-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/Frank2673/engagement-ledger/actions/workflows/ci.yml)
 ![零依赖](https://img.shields.io/badge/运行时依赖-0-brightgreen)
-![测试](https://img.shields.io/badge/测试-196%20passed-brightgreen)
+![测试](https://img.shields.io/badge/测试-222%20passed-brightgreen)
 ![Node](https://img.shields.io/badge/node-%3E%3D20-blue)
 
 ---
@@ -36,8 +36,11 @@
 git clone https://github.com/Frank2673/engagement-ledger
 cd engagement-ledger
 
-# 1. 给授权书原件算个指纹（把结果填进凭证）
-node src/index.mjs hash-doc 授权书.pdf
+# 1. 归档授权书并拿到指纹（把输出的两行填进凭证）
+node scripts/intake-authorization.mjs "D:\往来\AUTH-2026-001 签署版.pdf" \
+  --dir authorization --as AUTH-2026-001.pdf
+#   只想知道哈希、不想复制文件：加 --dry-run
+#   只要一条命令算哈希：node src/index.mjs hash-doc 授权书.pdf
 
 # 2. 用凭证初始化审计日志
 node src/index.mjs init --manifest fixtures/demo-engagement.json --ledger demo/ledger.jsonl
@@ -227,7 +230,9 @@ node src/index.mjs verify --ledger ledger.jsonl --hmac-key-env ENGAGEMENT_LEDGER
     "permittedActions":  ["recon", "scan", "manual-test"],
     "prohibitedActions": ["dos", "destructive", "data-exfiltration",
                           "persistence", "social-engineering"],
-    "emergencyContact": "security@example.com"
+    "emergencyContact": "security@example.com",
+
+    "requireEvidence": true   // 可选：每个已执行动作都必须附 --evidence，否则拒绝记录
   }
 }
 ```
@@ -235,6 +240,24 @@ node src/index.mjs verify --ledger ledger.jsonl --hmac-key-env ENGAGEMENT_LEDGER
 **校验规则**（缺失即报错，不是警告）：`id` / `tester` / `authorization.reference` /
 `authorization.signedBy` / `window` / `scope.inScope`（不能为空）。
 **只告警不阻断**：缺授权书哈希、缺应急联系人、缺建议禁止项。
+
+### 授权书怎么登记
+
+凭证里的 `documentSha256` 是"这份授权书此后没被换过"的唯一凭据。别手抄哈希 ——
+用脚本一次做完归档 + 算哈希 + 生成凭证片段：
+
+```bash
+node scripts/intake-authorization.mjs "D:\往来\AUTH-2026-001 签署版.pdf" \
+  --dir authorization --as AUTH-2026-001.pdf
+```
+
+它会拒绝覆盖已存在的归档副本（覆盖会作废已登记哈希），并按载体给出针对性提醒
+（扫描件每次扫描哈希都不同、`.msg` 建议同时留 `.eml`、`.docx` 不适合直接登记）。
+
+完整流程 —— 电子签章 PDF / 纸质扫描件 / 邮件授权三种来源的处理方式、客户侧复核命令、
+授权书变更流程、十类常见错误 —— 见 **[`docs/authorization-intake.md`](docs/authorization-intake.md)**。
+
+> 一句话原则：**先固定一份归档副本，此后只引用它，永不重新生成。**
 
 范围规则支持：精确域名（含子域）、通配 `*.example.com`、精确 IPv4/IPv6、IPv4/IPv6 CIDR。
 匹配时大小写不敏感、忽略尾部点，IPv6 支持 `::` 压缩、末尾内嵌 IPv4 与 `[方括号]` 写法。
@@ -253,7 +276,7 @@ node src/index.mjs verify --ledger ledger.jsonl --hmac-key-env ENGAGEMENT_LEDGER
 | `init` | 用凭证初始化日志，写入 genesis 记录并核验授权书 | 0 / 1 |
 | `check` | 执行前试判（**不写日志**） | 0 / 2 |
 | `log` | 校验 + 记录（拒绝也记录） | 0 / 2 / 1 |
-| `verify` | 校验日志哈希链完整性 | 0 / 3 |
+| `verify` | 校验日志哈希链完整性 + 委托归属 | 0 / 3 |
 | `report` | 生成合规报告（Markdown / JSON） | 0 / 3 |
 | `anchor` | 输出外部锚定行 | 0 / 3 |
 | `status` | 一页纸概览（授权状态 + 日志摘要） | 0 / 2 / 3 |
@@ -263,6 +286,26 @@ node src/index.mjs verify --ledger ledger.jsonl --hmac-key-env ENGAGEMENT_LEDGER
 
 `check` 与 `log` 是分开的：**试判不留痕，留痕必判定**。
 不确定某个目标能不能测时用 `check`，它不会污染日志。
+
+### 证据强制策略
+
+一条动作记录能不能被独立复核，取决于它有没有证据指针。这件事不该靠自觉：
+
+```bash
+# 单次强制
+node src/index.mjs log --target api.example.com --action scan \
+  --evidence logs/scan-001.txt --require-evidence
+
+# 或者写进凭证，让整个委托都要求证据（习惯会忘，策略不会）
+#   "requireEvidence": true
+```
+
+缺证据时 `log` **拒绝写入**（退出码 1，不留半条记录），并在报错里说明策略来源。
+报告第 1 章会写出当前策略，第 3.2 节对缺证据的动作给出提示；
+策略开启时措辞会升级为「本次委托**要求**每个已执行动作都附证据」。
+
+**被拒的动作不需要证据** —— 它什么都没做，没有证据可附；
+要求它为证据只会逼人给"没发生的事"造凭据。
 
 ---
 
@@ -355,12 +398,15 @@ src/
     gate.mjs             执行前校验门（7 项判定 + 完整轨迹）
     ledger.mjs           哈希链日志：追加、校验、锚定信息、委托归属校验
     report.mjs           合规报告（Markdown + JSON）
-tests/                   196 个测试，7 个文件
+tests/                   222 个测试，8 个文件
 scripts/
-  verify.mjs                  运营级校验：本地与 CI 跑同一份代码（28 项）
+  verify.mjs                  运营级校验：本地与 CI 跑同一份代码（35 项）
+  intake-authorization.mjs    授权书归档 + 算哈希 + 生成凭证片段
   check-zero-deps.mjs         零依赖 + 安全红线校验（CI 强制）
   check-report-tables.mjs     报告表格结构校验
   setup-hooks.mjs             启用仓库内 git hooks
+docs/
+  authorization-intake.md     授权书接收与哈希登记操作手册（三种载体 + 常见错误）
 fixtures/                示例凭证与示例授权书（虚构数据）
 ```
 
@@ -380,12 +426,12 @@ fixtures/                示例凭证与示例授权书（虚构数据）
 
 ```bash
 npm test                                    # 单元测试：node --test tests/
-node scripts/verify.mjs                     # 运营级校验：28 项，含负向验证
+node scripts/verify.mjs                     # 运营级校验：35 项，含负向验证
 npm run check                               # 上面全部 + 零依赖红线
 node tests/cli.test.mjs                     # 单跑某个文件
 ```
 
-196 个单元测试，重点覆盖的不是"能存能读"，而是**篡改能不能被发现**：
+222 个单元测试，重点覆盖的不是"能存能读"，而是**篡改能不能被发现**：
 
 - 改内容 / 改时间 / 删中间条 / 换顺序 / 改 prevHash —— 逐项验证能检出并定位
 - **负向验证**：纯哈希链下"整链重算"确实能伪造成功（承认边界），
@@ -398,7 +444,7 @@ node tests/cli.test.mjs                     # 单跑某个文件
 - 窗口合规：窗口前 / 窗口后的动作都被找出，边界时刻（起止）不算越窗，`note` 不算
 - 输入加固：目标名含 `|` 时报告表格不被撑破，由 `check-report-tables.mjs` 校验
 
-`scripts/verify.mjs` 是运营级校验，四组共 33 项：端到端闭环、篡改检测与归属、
+`scripts/verify.mjs` 是运营级校验，四组共 35 项：端到端闭环、篡改检测与归属、
 授权凭证守卫、安全红线。它的设计本身值得说一句 ——
 
 ### 为什么校验逻辑不写在 workflow 的 bash 里
@@ -441,6 +487,7 @@ CI 本身因此薄到只剩两条命令：`node --test tests/` 与 `node scripts
 
 - [`ETHICS.md`](ETHICS.md) —— 使用边界、使用者责任、开测前必须确认的事
 - [`SECURITY.md`](SECURITY.md) —— 本工具自身的威胁模型（它是被攻击对象）
+- [`docs/authorization-intake.md`](docs/authorization-intake.md) —— 授权书接收与哈希登记操作手册
 
 一句话：**这个工具不能替你完成授权判断**。凭证里的范围写错了，它会忠实地按错误范围放行。
 凭证必须来自真实的书面授权。

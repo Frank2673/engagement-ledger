@@ -213,6 +213,10 @@ export function validateManifest(input) {
       prohibitedActions: prohibited,
       emergencyContact: str(eng.emergencyContact) || null,
       notes: str(eng.notes) || null,
+      /* 证据强制策略：为 true 时每次 log 都必须带 --evidence。
+         委托方常会要求"每个动作都要有可复核的凭据"，把它做成凭证级策略
+         而不是命令行习惯 —— 习惯会忘，策略不会。 */
+      requireEvidence: eng.requireEvidence === true,
     },
     /* 硬性禁止清单随凭证一起下发，报告与校验门都用它，避免两处各写一份 */
     hardForbidden: [...NEVER_PERMITTED_ACTIONS],
