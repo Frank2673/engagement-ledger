@@ -205,6 +205,36 @@ check('A10 status 给出一页纸概览', () => {
   assert.match(r.stdout, /被拒绝的尝试（纪律证据）/);
 });
 
+check('A11 IPv6 目标按范围放行/拦截，方括号写法也能识别', () => {
+  const inScope = runCli(['check', '--manifest', A.manifest,
+    '--target', '2001:db8::1', '--action', 'scan', '--at', AT]);
+  assert.equal(inScope.code, 0, `IPv6 范围内目标应放行\n${inScope.stdout}`);
+
+  const bracketed = runCli(['check', '--manifest', A.manifest,
+    '--target', '[2001:db8::1]', '--action', 'scan', '--at', AT]);
+  assert.equal(bracketed.code, 0, '带方括号的 IPv6 也应识别');
+
+  const outOfScope = runCli(['check', '--manifest', A.manifest,
+    '--target', '2001:db9::1', '--action', 'scan', '--at', AT]);
+  assert.equal(outOfScope.code, 2, 'IPv6 范围外目标应被拦下');
+  assert.match(outOfScope.stdout, /不在 inScope/);
+});
+
+check('A12 凭证里写错的 IP 不会被静默当成域名放行', () => {
+  const C2 = makeEngagement('a12');
+  try {
+    const manifest = JSON.parse(readFileSync(C2.manifest, 'utf8'));
+    manifest.engagement.scope.inScope = ['999.1.1.1'];
+    writeFileSync(C2.manifest, JSON.stringify(manifest), 'utf8');
+
+    const r = runCli(['init', '--manifest', C2.manifest, '--ledger', C2.ledger]);
+    assert.notEqual(r.code, 0, '非法 IP 范围规则必须被拒绝');
+    assert.match(r.stderr, /范围规则格式不合法/);
+  } finally {
+    C2.cleanup();
+  }
+});
+
 /* 把这次闭环产出的真实证据留一份（CI 会传成构建产物供人工查看） */
 if (ARTIFACTS) {
   for (const f of ['ledger.jsonl', 'report.md', 'report.json']) {

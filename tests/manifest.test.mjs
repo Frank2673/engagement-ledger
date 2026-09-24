@@ -8,6 +8,9 @@ import {
   isValidScopeRule,
   matchesScopeRule,
   ipInCidr,
+  ipToBytes,
+  ipEquals,
+  normalizeTarget,
   NEVER_PERMITTED_ACTIONS,
   ManifestError,
 } from '../src/lib/manifest.mjs';
@@ -198,4 +201,105 @@ test('ipInCidr：边界值与异常输入', () => {
   /* 非法输入不抛异常，只返回 false */
   assert.equal(ipInCidr('not-an-ip', '10.0.0.0/8'), false);
   assert.equal(ipInCidr('10.0.0.1', '10.0.0.0/99'), false);
+});
+
+/* ------------------------- IP 解析 ------------------------- */
+
+test('ipToBytes：IPv4 解析与拒绝歧义写法', () => {
+  assert.deepEqual(ipToBytes('192.0.2.1'), [192, 0, 2, 1]);
+  assert.deepEqual(ipToBytes('0.0.0.0'), [0, 0, 0, 0]);
+  assert.equal(ipToBytes('256.0.0.1'), null);
+  assert.equal(ipToBytes('192.0.2'), null);
+  assert.equal(ipToBytes('192.0.2.1.5'), null);
+  /* 前导零在部分实现里按八进制解析，歧义地址直接拒绝 */
+  assert.equal(ipToBytes('010.0.0.1'), null);
+  assert.equal(ipToBytes('192.0.2.-1'), null);
+});
+
+test('ipToBytes：IPv6 完整写法与 :: 压缩', () => {
+  assert.deepEqual(ipToBytes('2001:db8:0:0:0:0:0:1'), [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+  /* :: 压缩展开后必须与完整写法一致 */
+  assert.deepEqual(ipToBytes('2001:db8::1'), ipToBytes('2001:db8:0:0:0:0:0:1'));
+  assert.deepEqual(ipToBytes('::1'), [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+  assert.deepEqual(ipToBytes('::'), new Array(16).fill(0));
+  assert.equal(ipToBytes('::1').length, 16);
+});
+
+test('ipToBytes：IPv6 内嵌 IPv4', () => {
+  assert.deepEqual(ipToBytes('::ffff:192.0.2.1'), ipToBytes('::ffff:c000:201'));
+  assert.equal(ipToBytes('::ffff:192.0.2.1').length, 16);
+});
+
+test('ipToBytes：非法 IPv6 被拒绝而不是尽力解析', () => {
+  for (const bad of ['2001:db8:::1', '2001:db8::1::2', 'gggg::1', '1:2:3:4:5:6:7:8:9', 'fe80::1%eth0', '::ffff:999.0.0.1']) {
+    assert.equal(ipToBytes(bad), null, `${bad} 应被拒绝`);
+  }
+});
+
+test('ipToBytes：空值与域名返回 null（不能把域名当 IP）', () => {
+  for (const notIp of ['', '  ', 'example.com', 'api.example.com', null, undefined]) {
+    assert.equal(ipToBytes(notIp), null);
+  }
+});
+
+test('ipEquals：同一地址的不同写法视为相等，不同族不相等', () => {
+  assert.equal(ipEquals('::1', '0:0:0:0:0:0:0:1'), true);
+  assert.equal(ipEquals('2001:DB8::1', '2001:db8::1'), true);
+  assert.equal(ipEquals('::ffff:192.0.2.1', '::ffff:c000:201'), true);
+  assert.equal(ipEquals('::1', '::2'), false);
+  /* v4 与 v6 永不相等 —— 不能让 ::ffff:1.2.3.4 匹配 1.2.3.4 */
+  assert.equal(ipEquals('192.0.2.1', '::ffff:192.0.2.1'), false);
+});
+
+/* ------------------------- IPv6 范围规则 ------------------------- */
+
+test('isValidScopeRule 接受 IPv6 与 IPv6 CIDR', () => {
+  for (const ok of ['2001:db8::1', '::1', 'fe80::', '2001:db8::/32', '::/0', '2001:db8::1/128']) {
+    assert.equal(isValidScopeRule(ok), true, `${ok} 应合法`);
+  }
+});
+
+test('isValidScopeRule 拒绝非法 IPv6 与越界前缀', () => {
+  for (const bad of ['2001:db8:::1', 'gggg::1', '2001:db8::/129', '::/999', '2001:db8::/abc']) {
+    assert.equal(isValidScopeRule(bad), false, `${bad} 应非法`);
+  }
+});
+
+test('写错的 IP 不会被当成域名放行（静默接受比报错更危险）', () => {
+  for (const bad of ['999.1.1.1', '1.2.3.4.5', '2001:db8::zz', '10.0.0.1/33']) {
+    assert.equal(isValidScopeRule(bad), false, `${bad} 必须被拒绝，不能掉进域名分支`);
+  }
+});
+
+test('matchesScopeRule：IPv6 精确匹配', () => {
+  assert.equal(matchesScopeRule('2001:db8::1', '2001:db8::1'), true);
+  assert.equal(matchesScopeRule('2001:db8::1', '2001:db8::2'), false);
+  /* 规则与目标写法不同但地址相同 */
+  assert.equal(matchesScopeRule('2001:db8::1', '2001:0db8:0000:0000:0000:0000:0000:0001'), true);
+  /* 带方括号的目标也应能匹配 */
+  assert.equal(matchesScopeRule('2001:db8::1', '[2001:db8::1]'), true);
+  assert.equal(matchesScopeRule('::1', '[::1]'), true);
+});
+
+test('matchesScopeRule：IPv6 CIDR', () => {
+  assert.equal(matchesScopeRule('2001:db8::/32', '2001:db8::1'), true);
+  assert.equal(matchesScopeRule('2001:db8::/32', '2001:db8:ffff::1'), true);
+  assert.equal(matchesScopeRule('2001:db8::/32', '2001:db9::1'), false);
+  /* /128 只等于自身 */
+  assert.equal(matchesScopeRule('2001:db8::1/128', '2001:db8::1'), true);
+  assert.equal(matchesScopeRule('2001:db8::1/128', '2001:db8::2'), false);
+  /* /0 覆盖全部 v6，但不覆盖 v4（不跨族） */
+  assert.equal(matchesScopeRule('::/0', '2001:db8::1'), true);
+  assert.equal(matchesScopeRule('::/0', '192.0.2.1'), false);
+});
+
+test('ipInCidr：跨族一律 false（配置错误不能变成"看起来通过"）', () => {
+  assert.equal(ipInCidr('192.0.2.1', '2001:db8::/32'), false);
+  assert.equal(ipInCidr('2001:db8::1', '192.0.2.0/24'), false);
+});
+
+test('域名规则不会匹配 IP 目标，反之亦然', () => {
+  assert.equal(matchesScopeRule('example.com', '192.0.2.1'), false);
+  assert.equal(matchesScopeRule('192.0.2.1', 'example.com'), false);
+  assert.equal(matchesScopeRule('2001:db8::1', 'example.com'), false);
 });

@@ -12,7 +12,7 @@
  * @module lib/gate
  */
 
-import { NEVER_PERMITTED_ACTIONS, matchesScopeRule } from './manifest.mjs';
+import { NEVER_PERMITTED_ACTIONS, matchesScopeRule, normalizeTarget } from './manifest.mjs';
 
 /**
  * 判定一个动作是否被授权
@@ -29,7 +29,8 @@ export function evaluateAction(manifest, { target, action, at = new Date() }) {
   const checks = [];
 
   const normalizedAction = String(action || '').trim().toLowerCase();
-  const normalizedTarget = String(target || '').trim().toLowerCase().replace(/\.$/, '');
+  /* 归一化交给 manifest：那里也负责去 IPv6 方括号，两处必须共用同一套规则 */
+  const normalizedTarget = normalizeTarget(target);
   const when = at instanceof Date ? at : new Date(at);
 
   const add = (name, passed, detail) => checks.push({ name, passed, detail });

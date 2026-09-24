@@ -11,7 +11,7 @@
       "signedTitle": "信息安全负责人",
       "signedAt": "2026-09-01",
       "document": "demo-authorization.md",
-      "documentSha256": "8c0b71f9b1abe2d9922500e6560ad5c87df4f8cb28b8cfb0ed277a9b4f6640e5"
+      "documentSha256": "79d735e9e1a72d64af900c39dc332a311110921c85a3e98e152646ada865df0a"
     },
     "window": {
       "from": "2026-09-01T09:00:00Z",
@@ -21,7 +21,8 @@
       "inScope": [
         "api.example.com",
         "staging.example.com",
-        "192.0.2.0/28"
+        "192.0.2.0/28",
+        "2001:db8::/32"
       ],
       "outOfScope": [
         "pay.example.com",

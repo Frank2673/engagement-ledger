@@ -61,6 +61,51 @@ test('范围内目标放行（含子域与 CIDR）', () => {
   }
 });
 
+/* ------------------------- IPv6 ------------------------- */
+
+test('IPv6 目标在范围内时放行', () => {
+  const m = manifest({ scope: { inScope: ['2001:db8::/32', '::1'], outOfScope: [] } });
+
+  for (const target of ['2001:db8::1', '2001:db8:ffff::a', '[2001:db8::1]', '::1']) {
+    const v = evaluateAction(m, { target, action: 'scan', at: IN_WINDOW });
+    assert.equal(v.allowed, true, `${target} 应在 IPv6 范围内`);
+  }
+
+  /* 归一化后目标不含方括号 */
+  const bracketed = evaluateAction(m, { target: '[2001:db8::1]', action: 'scan', at: IN_WINDOW });
+  assert.equal(bracketed.context.target, '2001:db8::1');
+});
+
+test('IPv6 范围外目标被拒绝', () => {
+  const m = manifest({ scope: { inScope: ['2001:db8::/32'], outOfScope: [] } });
+
+  const v = evaluateAction(m, { target: '2001:db9::1', action: 'scan', at: IN_WINDOW });
+  assert.equal(v.allowed, false);
+  assert.match(v.reason, /不在 inScope/);
+});
+
+test('IPv6 排除规则同样优先', () => {
+  const m = manifest({ scope: { inScope: ['2001:db8::/32'], outOfScope: ['2001:db8:bad::/48'] } });
+
+  assert.equal(evaluateAction(m, { target: '2001:db8:1::1', action: 'scan', at: IN_WINDOW }).allowed, true);
+  const denied = evaluateAction(m, { target: '2001:db8:bad::1', action: 'scan', at: IN_WINDOW });
+  assert.equal(denied.allowed, false);
+  assert.match(denied.reason, /排除/);
+});
+
+test('跨族不匹配：IPv4 目标不会命中 IPv6 网段', () => {
+  const m = manifest({ scope: { inScope: ['::/0'], outOfScope: [] } });
+  const v = evaluateAction(m, { target: '192.0.2.1', action: 'scan', at: IN_WINDOW });
+  assert.equal(v.allowed, false, '::/0 不能覆盖 v4 目标');
+});
+
+test('凭证里的非法 IPv6 范围规则会被 validateManifest 拦下', () => {
+  assert.throws(
+    () => manifest({ scope: { inScope: ['2001:db8:::1'], outOfScope: [] } }),
+    /范围规则格式不合法/
+  );
+});
+
 test('范围外目标被拒绝，并以"不在 inScope"为主因', () => {
   const v = evaluateAction(manifest(), { target: 'evil.com', action: 'scan', at: IN_WINDOW });
   assert.equal(v.allowed, false);

@@ -285,40 +285,66 @@ function parseTime(v) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-/** 范围规则：域名、*.domain、IP、CIDR */
+/**
+ * 范围规则：域名、*.domain、IPv4/IPv6、IPv4/IPv6 CIDR
+ *
+ * IPv6 必须支持 —— 只做 IPv4 的"范围强制"在双栈环境里会因为"写不进去"
+ * 而被绕过：使用者把 IPv6 目标写在注释里，然后照测。工具的边界要能表达
+ * 真实环境里存在的东西，否则它会被绕过，而不是被遵守。
+ */
 export function isValidScopeRule(rule) {
   const r = String(rule).trim();
   if (!r) return false;
+
   if (r.startsWith('*.')) return /^\*\.[a-z0-9.-]+\.[a-z]{2,}$/i.test(r);
-  if (/^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/.test(r)) {
-    const [ip, bits] = r.split('/');
-    return Number(bits) <= 32 && ip.split('.').every((o) => Number(o) <= 255);
+
+  /* CIDR：地址部分必须是合法字面量，前缀长度必须在family 范围内 */
+  if (r.includes('/')) {
+    const idx = r.lastIndexOf('/');
+    const addr = r.slice(0, idx);
+    const bits = r.slice(idx + 1);
+    const bytes = ipToBytes(addr);
+    if (!bytes) return false;
+    if (!/^\d{1,3}$/.test(bits)) return false;
+    const n = Number(bits);
+    return n >= 0 && n <= bytes.length * 8;
   }
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(r)) {
-    return r.split('.').every((o) => Number(o) <= 255);
-  }
+
+  if (ipToBytes(r)) return true;
+
+  /* 长得像 IP 但不是合法 IP（999.1.1.1、1.2.3.4.5、2001:db8::zz）必须直接拒绝，
+     绝不能让它们掉进域名分支被当成域名放行 ——
+     「把范围写错」而工具静默接受，是这类工具最危险的失败方式。 */
+  if (looksLikeIp(r)) return false;
+
   return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(r);
+}
+
+/** 粗略判断"这是想写一个 IP"：有冒号，或整体是点分数字 */
+function looksLikeIp(s) {
+  if (s.includes(':')) return true;
+  return /^\d+(\.\d+)*$/.test(s);
 }
 
 /**
  * 判断目标是否匹配某条范围规则
  * 支持：精确域名、子域（*.example.com 与 example.com 都覆盖 api.example.com）、
- *       精确 IP、CIDR
+ *       精确 IPv4/IPv6、IPv4/IPv6 CIDR
  */
 export function matchesScopeRule(rule, target) {
   const r = String(rule).trim().toLowerCase();
-  const t = String(target).trim().toLowerCase().replace(/\.$/, '');
+  const t = normalizeTarget(target);
 
   if (!r || !t) return false;
 
-  /* CIDR */
+  /* CIDR（v4 与 v6 都走这里） */
   if (r.includes('/')) {
     return ipInCidr(t, r);
   }
 
-  /* 纯 IP：精确匹配 */
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(r)) {
-    return r === t;
+  /* 纯 IP 字面量：按字节比较，容忍不同写法（::1 与 0:0:0:0:0:0:0:1） */
+  if (ipToBytes(r)) {
+    return ipEquals(r, t);
   }
 
   /* 通配子域 */
@@ -331,17 +357,123 @@ export function matchesScopeRule(rule, target) {
   return t === r || t.endsWith('.' + r);
 }
 
-/** IPv4 CIDR 判定 */
+/**
+ * CIDR 判定，IPv4 与 IPv6 通用
+ *
+ * 两个地址必须同族 —— 拿 v4 地址去匹配 v6 网段是配置错误，
+ * 这里返回 false 而不是"尽力而为"，避免产生看起来通过其实没校验的结果。
+ */
 export function ipInCidr(ip, cidr) {
-  const [net, bitsStr] = cidr.split('/');
+  const idx = String(cidr).lastIndexOf('/');
+  if (idx === -1) return false;
+
+  const netBytes = ipToBytes(String(cidr).slice(0, idx));
+  const ipBytes = ipToBytes(ip);
+  if (!netBytes || !ipBytes) return false;
+  if (netBytes.length !== ipBytes.length) return false;
+
+  const bitsStr = String(cidr).slice(idx + 1);
+  if (!/^\d{1,3}$/.test(bitsStr)) return false;
   const bits = Number(bitsStr);
-  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip) || !/^\d{1,3}(\.\d{1,3}){3}$/.test(net)) return false;
-  if (bits < 0 || bits > 32) return false;
+  if (bits < 0 || bits > ipBytes.length * 8) return false;
 
-  const toInt = (s) => s.split('.').reduce((acc, o) => (acc << 8) + Number(o), 0) >>> 0;
-  const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+  const fullBytes = Math.floor(bits / 8);
+  for (let i = 0; i < fullBytes; i++) {
+    if (ipBytes[i] !== netBytes[i]) return false;
+  }
 
-  return (toInt(ip) & mask) === (toInt(net) & mask);
+  const restBits = bits % 8;
+  if (restBits > 0) {
+    const mask = (0xff << (8 - restBits)) & 0xff;
+    if ((ipBytes[fullBytes] & mask) !== (netBytes[fullBytes] & mask)) return false;
+  }
+
+  return true;
+}
+
+/* ------------------------- IP 解析 ------------------------- */
+
+/** 目标归一化：小写、去尾点、去 IPv6 方括号 */
+export function normalizeTarget(value) {
+  let t = String(value ?? '').trim().toLowerCase();
+  if (t.startsWith('[') && t.endsWith(']')) t = t.slice(1, -1);
+  return t.replace(/\.$/, '');
+}
+
+/**
+ * 把 IP 字面量解析成字节数组；不是合法 IP 时返回 null
+ * IPv4 → 4 字节；IPv6 → 16 字节（支持 :: 压缩与末尾内嵌 IPv4）
+ */
+export function ipToBytes(value) {
+  const s = normalizeTarget(value);
+  if (!s) return null;
+  if (s.includes('%')) return null;            // 带 zone id 的地址不参与范围判定
+  if (s.includes(':')) return ipv6ToBytes(s);
+  return ipv4ToBytes(s);
+}
+
+function ipv4ToBytes(s) {
+  const parts = s.split('.');
+  if (parts.length !== 4) return null;
+  const bytes = [];
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return null;
+    const n = Number(part);
+    if (n > 255) return null;
+    /* 前导零在 inet_aton 里是八进制，这里直接拒绝，避免 "010.0.0.1" 这类歧义写法 */
+    if (part.length > 1 && part.startsWith('0')) return null;
+    bytes.push(n);
+  }
+  return bytes;
+}
+
+function ipv6ToBytes(s) {
+  let work = s;
+
+  /* 末尾内嵌 IPv4（::ffff:192.0.2.1）先换成两个十六进制组 */
+  const embedded = work.match(/^(.*:)(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (embedded) {
+    const v4 = ipv4ToBytes(embedded[2]);
+    if (!v4) return null;
+    const hi = ((v4[0] << 8) | v4[1]).toString(16);
+    const lo = ((v4[2] << 8) | v4[3]).toString(16);
+    work = `${embedded[1]}${hi}:${lo}`;
+  }
+
+  let head;
+  let tail;
+  if (work.includes('::')) {
+    if (work.indexOf('::') !== work.lastIndexOf('::')) return null;   // 只能压缩一次
+    const [h, t] = work.split('::');
+    head = h ? h.split(':') : [];
+    tail = t ? t.split(':') : [];
+    /* :: 至少要代表一组 0，所以两侧组数之和不能超过 7 */
+    if (head.length + tail.length > 7) return null;
+  } else {
+    head = work.split(':');
+    tail = [];
+    if (head.length !== 8) return null;
+  }
+
+  const groups = [...head, ...Array(8 - head.length - tail.length).fill('0'), ...tail];
+  if (groups.length !== 8) return null;
+
+  const bytes = [];
+  for (const g of groups) {
+    if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+    const n = parseInt(g, 16);
+    bytes.push((n >> 8) & 0xff, n & 0xff);
+  }
+  return bytes;
+}
+
+/** 两个 IP 字面量是否指向同一地址（容忍不同写法，但不跨族） */
+export function ipEquals(a, b) {
+  const x = ipToBytes(a);
+  const y = ipToBytes(b);
+  if (!x || !y) return false;
+  if (x.length !== y.length) return false;
+  return x.every((byte, i) => byte === y[i]);
 }
 
 /* 供 CLI 使用：计算任意文件的 sha256 以便填入凭证 */

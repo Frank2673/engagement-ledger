@@ -10,7 +10,7 @@
 
 [![CI](https://github.com/Frank2673/engagement-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/Frank2673/engagement-ledger/actions/workflows/ci.yml)
 ![零依赖](https://img.shields.io/badge/运行时依赖-0-brightgreen)
-![测试](https://img.shields.io/badge/测试-154%20passed-brightgreen)
+![测试](https://img.shields.io/badge/测试-172%20passed-brightgreen)
 ![Node](https://img.shields.io/badge/node-%3E%3D20-blue)
 
 ---
@@ -219,7 +219,8 @@ node src/index.mjs verify --ledger ledger.jsonl --hmac-key-env ENGAGEMENT_LEDGER
     "window": { "from": "2026-09-01T09:00:00Z", "to": "2026-12-31T18:00:00Z" },
 
     "scope": {
-      "inScope":    ["api.example.com", "*.staging.example.com", "192.0.2.0/28"],
+      "inScope":    ["api.example.com", "*.staging.example.com",
+                     "192.0.2.0/28", "2001:db8::/32"],       // v4 与 v6 都支持
       "outOfScope": ["pay.example.com", "*.example.org"]     // 排除优先
     },
 
@@ -235,8 +236,12 @@ node src/index.mjs verify --ledger ledger.jsonl --hmac-key-env ENGAGEMENT_LEDGER
 `authorization.signedBy` / `window` / `scope.inScope`（不能为空）。
 **只告警不阻断**：缺授权书哈希、缺应急联系人、缺建议禁止项。
 
-范围规则支持：精确域名（含子域）、通配 `*.example.com`、精确 IP、CIDR。
-匹配时大小写不敏感、忽略尾部点。
+范围规则支持：精确域名（含子域）、通配 `*.example.com`、精确 IPv4/IPv6、IPv4/IPv6 CIDR。
+匹配时大小写不敏感、忽略尾部点，IPv6 支持 `::` 压缩、末尾内嵌 IPv4 与 `[方括号]` 写法。
+
+**写错的 IP 会被拒绝，而不是被当成域名放行**。`999.1.1.1`、`1.2.3.4.5`、`2001:db8:::1`
+都不会通过凭证校验 —— 一个"范围写错了却静默生效"的工具，比没有工具更危险。
+同理，IPv4 目标不会命中 IPv6 网段（反向亦然）：跨族是配置错误，不能变成"看起来通过"。
 
 ---
 
@@ -307,11 +312,11 @@ src/
   index.mjs              CLI 入口（8 个子命令）
   lib/
     crypto.mjs           确定性 JSON 序列化 + 哈希 + HMAC
-    manifest.mjs         授权凭证校验、范围规则、CIDR 匹配、硬性禁止清单
+    manifest.mjs         授权凭证校验、范围规则、IPv4/IPv6 CIDR 匹配、硬性禁止清单
     gate.mjs             执行前校验门（7 项判定 + 完整轨迹）
     ledger.mjs           哈希链日志：追加、校验、锚定信息
     report.mjs           合规报告（Markdown + JSON）
-tests/                   154 个测试，7 个文件
+tests/                   172 个测试，7 个文件
 scripts/
   verify.mjs                  运营级校验：本地与 CI 跑同一份代码（28 项）
   check-zero-deps.mjs         零依赖 + 安全红线校验（CI 强制）
@@ -341,13 +346,15 @@ npm run check                               # 上面全部 + 零依赖红线
 node tests/cli.test.mjs                     # 单跑某个文件
 ```
 
-154 个单元测试，重点覆盖的不是"能存能读"，而是**篡改能不能被发现**：
+172 个单元测试，重点覆盖的不是"能存能读"，而是**篡改能不能被发现**：
 
 - 改内容 / 改时间 / 删中间条 / 换顺序 / 改 prevHash —— 逐项验证能检出并定位
 - **负向验证**：纯哈希链下"整链重算"确实能伪造成功（承认边界），
   而启用 HMAC 后同样的攻击会失败 —— 两个方向都有断言
 - 截断末尾不报错，但 `anchorInfo` 会暴露条数与链头变化（说明为什么必须外部锚定）
 - CLI 端到端：init 重复初始化被拒、check 不写日志、越界退出码 2、篡改退出码 3
+- IPv6：`::` 压缩、内嵌 IPv4、`[方括号]`、跨族不匹配、非法地址拒绝
+- "写错的 IP 不能掉进域名分支"是单独一条测试 —— 静默接受错误范围比报错危险得多
 - 输入加固：目标名含 `|` 时报告表格不被撑破，由 `check-report-tables.mjs` 校验
 
 `scripts/verify.mjs` 是运营级校验，四组共 28 项：端到端闭环、篡改检测、
