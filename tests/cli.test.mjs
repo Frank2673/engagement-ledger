@@ -628,6 +628,47 @@ test('status 列出最近动作（流水入口）', () => {
   }
 });
 
+/* ------------------------- 窗口合规 ------------------------- */
+
+test('report 检出发生在授权窗口之外的已执行动作并返回 3', () => {
+  const sb = sandbox();
+  try {
+    run(['init', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath]);
+    run(['log', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath,
+      '--target', 'example.com', '--action', 'scan', '--at', AT]);
+
+    /* 模拟"窗口事后被改动过"或"绕过了校验门写进来的记录" */
+    appendEntry(sb.ledgerPath, {
+      seq: 0, type: 'action', actor: 'alice', action: 'recon', target: 'example.com',
+      decision: 'allowed', result: 'late', timestamp: '2027-03-01T00:00:00.000Z',
+      engagementId: 'ENG-001',
+    });
+
+    const r = run(['report', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath, '--stdout']);
+    assert.equal(r.code, 3, `应返回 3，实际 ${r.code}`);
+    assert.match(r.stdout, /### 4\.1 ⚠️ 发生在授权窗口之外的已执行动作/);
+    assert.match(r.stdout, /窗口之后/);
+    assert.match(r.stdout, /2027-03-01/);
+  } finally {
+    sb.cleanup();
+  }
+});
+
+test('窗口内的动作不会触发 4.1 节', () => {
+  const sb = sandbox();
+  try {
+    run(['init', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath]);
+    run(['log', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath,
+      '--target', 'example.com', '--action', 'scan', '--at', AT]);
+
+    const r = run(['report', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath, '--stdout']);
+    assert.equal(r.code, 0);
+    assert.ok(!r.stdout.includes('发生在授权窗口之外的已执行动作'));
+  } finally {
+    sb.cleanup();
+  }
+});
+
 /* ------------------------- 参数解析 ------------------------- */
 
 test('--key=value 与 --key value 两种写法都支持', () => {

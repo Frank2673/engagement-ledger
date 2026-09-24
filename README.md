@@ -10,7 +10,7 @@
 
 [![CI](https://github.com/Frank2673/engagement-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/Frank2673/engagement-ledger/actions/workflows/ci.yml)
 ![零依赖](https://img.shields.io/badge/运行时依赖-0-brightgreen)
-![测试](https://img.shields.io/badge/测试-188%20passed-brightgreen)
+![测试](https://img.shields.io/badge/测试-196%20passed-brightgreen)
 ![Node](https://img.shields.io/badge/node-%3E%3D20-blue)
 
 ---
@@ -276,6 +276,7 @@ node src/index.mjs verify --ledger ledger.jsonl --hmac-key-env ENGAGEMENT_LEDGER
    - **3.1 涉及的目标**
    - **3.2 动作流水** —— 按写入顺序列出全部已执行动作与人工备注
 4. **越界尝试与被拒记录** —— 单独成表，**这是纪律的证据**
+   - **4.1 窗口外的已执行动作** —— 出现在授权窗口之外的动作（见下）
 5. **日志完整性** —— 链校验结论 + 链头哈希
    - **5.1 委托归属异常** —— 日志里混进了别的委托的记录时出现（见下）
 6. **外部锚定** —— 为什么要锚定、锚定行、如何操作
@@ -327,6 +328,20 @@ node src/index.mjs verify --ledger ledger.jsonl --hmac-key-env ENGAGEMENT_LEDGER
 但发现不了「真的在两个目标上做了事却只在日志里写了一个委托」——
 那属于工具之外的行为（见 [`SECURITY.md`](SECURITY.md) §1.3）。
 
+### 链完整 ≠ 动作都发生在授权时间窗内
+
+校验门会在动作发生前拦住窗口外的动作。所以如果日志里出现了窗口外的**已执行动作**，
+只有两种解释：
+
+1. **窗口在事后被改动过**（把窗口改窄了）
+2. **这条记录绕过了校验门被写进来**
+
+两种都需要人工说明 —— 审计方看到「授权是 9 月、日志里有次年 3 月的动作」时
+不会自己脑补原因。报告第 4.1 节会把这些动作列出来，标注相对窗口的方向
+（窗口之前 / 窗口之后），CLI 返回退出码 3。
+
+只算 `action` 类型：`note`（与客户确认、范围变更的记录）不涉及对目标动手，不算越窗。
+
 ---
 
 ## 项目结构
@@ -340,7 +355,7 @@ src/
     gate.mjs             执行前校验门（7 项判定 + 完整轨迹）
     ledger.mjs           哈希链日志：追加、校验、锚定信息、委托归属校验
     report.mjs           合规报告（Markdown + JSON）
-tests/                   188 个测试，7 个文件
+tests/                   196 个测试，7 个文件
 scripts/
   verify.mjs                  运营级校验：本地与 CI 跑同一份代码（28 项）
   check-zero-deps.mjs         零依赖 + 安全红线校验（CI 强制）
@@ -370,7 +385,7 @@ npm run check                               # 上面全部 + 零依赖红线
 node tests/cli.test.mjs                     # 单跑某个文件
 ```
 
-172 个单元测试，重点覆盖的不是"能存能读"，而是**篡改能不能被发现**：
+196 个单元测试，重点覆盖的不是"能存能读"，而是**篡改能不能被发现**：
 
 - 改内容 / 改时间 / 删中间条 / 换顺序 / 改 prevHash —— 逐项验证能检出并定位
 - **负向验证**：纯哈希链下"整链重算"确实能伪造成功（承认边界），
@@ -380,9 +395,10 @@ node tests/cli.test.mjs                     # 单跑某个文件
 - IPv6：`::` 压缩、内嵌 IPv4、`[方括号]`、跨族不匹配、非法地址拒绝
 - "写错的 IP 不能掉进域名分支"是单独一条测试 —— 静默接受错误范围比报错危险得多
 - 委托归属：预防（`log` 拒绝跨委托追加）与检测（混入记录被检出并定位）两个方向
+- 窗口合规：窗口前 / 窗口后的动作都被找出，边界时刻（起止）不算越窗，`note` 不算
 - 输入加固：目标名含 `|` 时报告表格不被撑破，由 `check-report-tables.mjs` 校验
 
-`scripts/verify.mjs` 是运营级校验，四组共 32 项：端到端闭环、篡改检测与归属、
+`scripts/verify.mjs` 是运营级校验，四组共 33 项：端到端闭环、篡改检测与归属、
 授权凭证守卫、安全红线。它的设计本身值得说一句 ——
 
 ### 为什么校验逻辑不写在 workflow 的 bash 里

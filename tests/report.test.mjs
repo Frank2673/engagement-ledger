@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { validateManifest } from '../src/lib/manifest.mjs';
 import { makeEntry, sealEntry } from '../src/lib/ledger.mjs';
-import { summarizeLedger, buildReport, buildJsonReport } from '../src/lib/report.mjs';
+import { summarizeLedger, buildReport, buildJsonReport, findOutOfWindowActions } from '../src/lib/report.mjs';
 import { GENESIS_HASH } from '../src/lib/crypto.mjs';
 
 function manifest() {
@@ -341,6 +341,74 @@ test('JSON 报告在链断裂时反映真实状态', () => {
 test('JSON 报告的授权窗口是 ISO 字符串（可跨语言消费）', () => {
   const json = buildJsonReport({ manifest: manifest(), entries: entries() });
   assert.match(json.engagement.window.from, /^\d{4}-\d{2}-\d{2}T/);
+});
+
+/* ------------------------- 窗口外动作 ------------------------- */
+
+/** 造一条发生在授权窗口之后（2027 年）的已执行动作 */
+function withLateAction() {
+  const list = entries();
+  list.push(makeEntry({
+    seq: 4, type: 'action', actor: 'alice', action: 'scan', target: 'api.example.com',
+    decision: 'allowed', result: 'late', timestamp: '2027-01-15T10:00:00.000Z',
+  }));
+  list[4].engagementId = 'ENG-001';
+  return reseal(list);
+}
+
+test('findOutOfWindowActions 找出窗口前后的动作并标注方向', () => {
+  const m = manifest();
+  const list = entries();
+
+  list.push(makeEntry({ seq: 4, type: 'action', actor: 'a', action: 'scan', target: 't1', timestamp: '2026-08-15T00:00:00.000Z' }));
+  list.push(makeEntry({ seq: 5, type: 'action', actor: 'a', action: 'scan', target: 't2', timestamp: '2027-01-15T00:00:00.000Z' }));
+  list.push(makeEntry({ seq: 6, type: 'note', actor: 'a', reason: '窗口外的备注不算动作', timestamp: '2027-02-01T00:00:00.000Z' }));
+
+  const found = findOutOfWindowActions(list, m.engagement.window);
+  assert.equal(found.length, 2, 'note 不算越窗，窗口内的动作不算');
+  assert.deepEqual(found.map((f) => f.direction), ['窗口之前', '窗口之后']);
+  assert.deepEqual(found.map((f) => f.target), ['t1', 't2']);
+});
+
+test('窗口边界上的动作不算越窗（起止时刻含在内）', () => {
+  const m = manifest();
+  const list = entries();
+  list.push(makeEntry({ seq: 4, type: 'action', actor: 'a', action: 'scan', target: 't', timestamp: '2026-09-01T00:00:00.000Z' }));
+  list.push(makeEntry({ seq: 5, type: 'action', actor: 'a', action: 'scan', target: 't', timestamp: '2026-12-31T00:00:00.000Z' }));
+
+  assert.deepEqual(findOutOfWindowActions(list, m.engagement.window), []);
+});
+
+test('时间戳无法解析的记录不计入（避免误报）', () => {
+  const m = manifest();
+  const list = [{ seq: 0, type: 'action', timestamp: 'not-a-time', action: 'scan' }];
+  assert.deepEqual(findOutOfWindowActions(list, m.engagement.window), []);
+});
+
+test('报告在存在窗口外动作时输出 4.1 节并给出两种解释', () => {
+  const md = buildReport({ manifest: manifest(), entries: withLateAction() });
+
+  assert.ok(md.includes('### 4.1 ⚠️ 发生在授权窗口之外的已执行动作'));
+  assert.ok(md.includes('窗口在事后被改动过'));
+  assert.ok(md.includes('绕过了校验门被写进来'));
+  assert.ok(md.includes('窗口之后'));
+  assert.ok(md.includes('2027-01-15'));
+});
+
+test('无窗口外动作时不出现 4.1 节', () => {
+  const md = buildReport({ manifest: manifest(), entries: entries() });
+  assert.ok(!md.includes('发生在授权窗口之外的已执行动作'));
+});
+
+test('JSON 报告带 outOfWindow 字段', () => {
+  const dirty = buildJsonReport({ manifest: manifest(), entries: withLateAction() });
+  assert.equal(dirty.outOfWindow.ok, false);
+  assert.equal(dirty.outOfWindow.count, 1);
+  assert.equal(dirty.outOfWindow.actions[0].direction, '窗口之后');
+
+  const clean = buildJsonReport({ manifest: manifest(), entries: entries() });
+  assert.equal(clean.outOfWindow.ok, true);
+  assert.equal(clean.outOfWindow.count, 0);
 });
 
 /* ------------------------- 委托归属 ------------------------- */

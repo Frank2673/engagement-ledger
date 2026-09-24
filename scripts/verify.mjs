@@ -402,6 +402,44 @@ check('B7 已混入的其它委托记录会被检出（检测）', () => {
   }
 });
 
+check('B8 落在授权窗口之外的已执行动作会被检出', () => {
+  const S = makeEngagement('b8');
+  try {
+    runCli(['init', '--manifest', S.manifest, '--ledger', S.ledger]);
+    runCli(['log', '--manifest', S.manifest, '--ledger', S.ledger,
+      '--target', 'api.example.com', '--action', 'recon', '--at', AT]);
+
+    /* 校验门本应拦住窗口外的动作，所以这条记录只能是"窗口事后被改动过"
+       或"绕过了校验门写进来的" —— 两种都必须让审计方看见 */
+    appendEntry(S.ledger, {
+      seq: 0, type: 'action', actor: 'alice', action: 'scan', target: 'api.example.com',
+      decision: 'allowed', result: 'late', timestamp: '2027-03-01T00:00:00.000Z',
+      engagementId: 'ENG-2026-DEMO-001',
+    });
+
+    const report = runCli(['report', '--manifest', S.manifest, '--ledger', S.ledger, '--stdout']);
+    assert.equal(report.code, 3, `应返回 3，实际 ${report.code}`);
+    assert.match(report.stdout, /### 4\.1 ⚠️ 发生在授权窗口之外的已执行动作/);
+    assert.match(report.stdout, /窗口之后/);
+    assert.match(report.stdout, /绕过了校验门被写进来/);
+
+    /* 反向确认：窗口内的动作不触发该节 */
+    const clean = makeEngagement('b8-clean');
+    try {
+      runCli(['init', '--manifest', clean.manifest, '--ledger', clean.ledger]);
+      runCli(['log', '--manifest', clean.manifest, '--ledger', clean.ledger,
+        '--target', 'api.example.com', '--action', 'recon', '--at', AT]);
+      const ok = runCli(['report', '--manifest', clean.manifest, '--ledger', clean.ledger, '--stdout']);
+      assert.equal(ok.code, 0, `窗口内动作不应触发告警，实际 ${ok.code}`);
+      assert.ok(!ok.stdout.includes('发生在授权窗口之外的已执行动作'), '不应出现 4.1 节');
+    } finally {
+      clean.cleanup();
+    }
+  } finally {
+    S.cleanup();
+  }
+});
+
 /* ============================ C. 授权凭证守卫 ============================ */
 
 group('\nC. 授权凭证守卫（坏凭证必须被拒绝）');

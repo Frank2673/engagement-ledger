@@ -22,7 +22,7 @@ import { resolve, basename } from 'node:path';
 import { loadManifest, verifyAuthorizationDocument, NEVER_PERMITTED_ACTIONS } from './lib/manifest.mjs';
 import { evaluateAction } from './lib/gate.mjs';
 import { loadLedger, appendEntry, verifyLedger, anchorInfo, makeEntry, checkEngagementConsistency } from './lib/ledger.mjs';
-import { buildReport, buildJsonReport, summarizeLedger } from './lib/report.mjs';
+import { buildReport, buildJsonReport, summarizeLedger, findOutOfWindowActions } from './lib/report.mjs';
 import { fileSha256 } from './lib/crypto.mjs';
 
 const DEFAULT_MANIFEST = 'engagement.json';
@@ -370,6 +370,15 @@ function cmdReport({ manifestPath, ledgerPath, options }) {
     process.stdout.write(
       `\n⚠️  注意：${consistency.foreign.length} 条记录属于别的委托，报告第 5.1 节已标注。\n` +
         `   统计数字与动作流水包含了不属于本次委托的内容，纠正前不要交付客户。\n`
+    );
+    return EXIT.INTEGRITY;
+  }
+
+  const outOfWindow = findOutOfWindowActions(entries, manifest.engagement.window);
+  if (outOfWindow.length > 0) {
+    process.stdout.write(
+      `\n⚠️  注意：${outOfWindow.length} 条已执行动作落在授权窗口之外，报告第 4.1 节已标注。\n` +
+        `   校验门本应拦住它们 —— 说明窗口事后被改动过，或有记录绕过了校验门。\n`
     );
     return EXIT.INTEGRITY;
   }

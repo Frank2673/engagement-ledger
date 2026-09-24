@@ -73,6 +73,37 @@ export function summarizeLedger(entries) {
 }
 
 /**
+ * 找出发生在授权窗口之外的**已执行动作**
+ *
+ * 校验门本应在动作发生前就拦住窗口外的动作，所以这种记录出现只有两种可能：
+ *   1. 窗口在事后被改动过（缩小了）
+ *   2. 这条记录绕过了校验门被写进来
+ * 两种都需要人工解释 —— 审计方看到「授权是 9 月，日志里有 10 月的动作」时
+ * 不会自己脑补原因，报告必须主动说清楚。
+ *
+ * 只算 action 类型：note（人工备注）不涉及对目标动手，不算越窗。
+ */
+export function findOutOfWindowActions(entries, window) {
+  const from = window.from.getTime();
+  const to = window.to.getTime();
+
+  return entries
+    .filter((e) => e.type === 'action')
+    .filter((e) => {
+      const t = new Date(e.timestamp).getTime();
+      return Number.isFinite(t) && (t < from || t > to);
+    })
+    .map((e) => ({
+      seq: e.seq,
+      timestamp: e.timestamp,
+      action: e.action || null,
+      target: e.target || null,
+      result: e.result || null,
+      direction: new Date(e.timestamp).getTime() < from ? '窗口之前' : '窗口之后',
+    }));
+}
+
+/**
  * 生成 Markdown 报告
  *
  * @param {object} options
@@ -88,6 +119,7 @@ export function buildReport({ manifest, entries, hmacKey = null }) {
   const verification = verifyLedger(entries, { hmacKey });
   const anchor = anchorInfo(entries, { hmacKey });
   const consistency = checkEngagementConsistency(eng.id, entries);
+  const outOfWindow = findOutOfWindowActions(entries, eng.window);
   const now = new Date();
 
   const lines = [];
@@ -228,6 +260,26 @@ export function buildReport({ manifest, entries, hmacKey = null }) {
     }
   }
   p();
+  if (outOfWindow.length > 0) {
+    p(`### 4.1 ⚠️ 发生在授权窗口之外的已执行动作`);
+    p();
+    p(
+      `校验门本应在动作发生前拦住窗口外的动作，因此这些记录只有两种解释：` +
+        `**窗口在事后被改动过**，或者**这条记录绕过了校验门被写进来**。两种都需要人工说明。`
+    );
+    p();
+    p(`| # | 事件时间 | 相对窗口 | 动作 | 目标 | 结果 |`);
+    p(`| --- | --- | --- | --- | --- | --- |`);
+    for (const o of outOfWindow) {
+      p(
+        `| ${o.seq} | ${escapeCell(fmt(o.timestamp))} | ${escapeCell(o.direction)} | ` +
+          `\`${escapeCell(o.action)}\` | ${o.target ? `\`${escapeCell(o.target)}\`` : '—'} | ${escapeCell(o.result || '—')} |`
+      );
+    }
+    p();
+    p(`授权窗口：${fmt(eng.window.from)} ~ ${fmt(eng.window.to)}`);
+    p();
+  }
 
   /* ---- 5. 完整性 ---- */
   p(`## 5. 日志完整性`);
@@ -327,6 +379,7 @@ export function buildReport({ manifest, entries, hmacKey = null }) {
 export function buildJsonReport({ manifest, entries, hmacKey = null }) {
   const verification = verifyLedger(entries, { hmacKey });
   const consistency = checkEngagementConsistency(manifest.engagement.id, entries);
+  const outOfWindow = findOutOfWindowActions(entries, manifest.engagement.window);
   return {
     generatedAt: new Date().toISOString(),
     engagement: {
@@ -364,6 +417,12 @@ export function buildJsonReport({ manifest, entries, hmacKey = null }) {
       foreignCount: consistency.foreign.length,
       foreign: consistency.foreign,
       untagged: consistency.untagged,
+    },
+    /* 窗口合规：已执行动作落在授权窗口之外的条目 */
+    outOfWindow: {
+      ok: outOfWindow.length === 0,
+      count: outOfWindow.length,
+      actions: outOfWindow,
     },
     anchor: anchorInfo(entries, { hmacKey }),
     warnings: manifest.warnings || [],
