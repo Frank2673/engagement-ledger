@@ -46,10 +46,25 @@
 
 - **工程**
   - 零运行时依赖（仅 Node 内置模块），CI 强制校验
-  - 133 个测试，含篡改检测、HMAC、表格注入、CLI 端到端
-  - CI 五个作业：单元测试与零依赖、端到端闭环、篡改检测负向验证、
-    凭证守卫、输入加固
+  - 145 个单元测试，含篡改检测、HMAC、表格注入、CLI 端到端
+  - `scripts/verify.mjs` 运营级校验 28 项（端到端闭环 / 篡改检测 /
+    凭证守卫 / 安全红线），本地与 CI 共用同一份代码
+  - CI 薄到只剩两条命令：`node --test tests/` 与 `node scripts/verify.mjs`
   - 仓库内 git hooks（Conventional Commits）
+
+### 首次提交的 CI 失败与修正
+
+第一次推送后 CI 两个作业失败。根因**全在 workflow 里的 bash 片段**，与被测代码无关：
+
+- `grep ... || { echo ...; exit 1; fi` —— `{` 与 `fi` 混用，报 syntax error
+- 篡改检测作业用了 `a.example.com` / `b.example.com` / `c.example.com` 造日志，
+  而这三个域名不在示例凭证的授权范围内 → `log` 正确返回退出码 2 →
+  配合 `set -e` 直接中断循环
+
+这两个错误的共同点是：**bash 片段在本地跑不了，只能推上去等 CI 反馈**。
+因此把校验逻辑整体搬进 `scripts/verify.mjs`（Node，进程内驱动 CLI）：
+本地与 CI 跑同一份代码，一条命令即可在推送前跑完全部 28 项校验。
+CI 现在只是一层薄封装。
 
 ### 已知限制
 

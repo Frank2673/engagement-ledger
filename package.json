@@ -12,8 +12,9 @@
   },
   "scripts": {
     "test": "node --test tests/",
+    "verify": "node scripts/verify.mjs",
     "check:deps": "node scripts/check-zero-deps.mjs",
-    "check": "npm run check:deps && npm run test",
+    "check": "npm run check:deps && npm run test && npm run verify",
     "hooks": "node scripts/setup-hooks.mjs",
     "demo:init": "node src/index.mjs init --manifest fixtures/demo-engagement.json --ledger demo/ledger.jsonl",
     "demo:log": "node src/index.mjs log --manifest fixtures/demo-engagement.json --ledger demo/ledger.jsonl",

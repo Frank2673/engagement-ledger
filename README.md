@@ -288,8 +288,9 @@ src/
     gate.mjs             执行前校验门（7 项判定 + 完整轨迹）
     ledger.mjs           哈希链日志：追加、校验、锚定信息
     report.mjs           合规报告（Markdown + JSON）
-tests/                   133 个测试，6 + 1 个文件
+tests/                   145 个测试，7 个文件
 scripts/
+  verify.mjs                  运营级校验：本地与 CI 跑同一份代码（28 项）
   check-zero-deps.mjs         零依赖 + 安全红线校验（CI 强制）
   check-report-tables.mjs     报告表格结构校验
   setup-hooks.mjs             启用仓库内 git hooks
@@ -311,12 +312,13 @@ fixtures/                示例凭证与示例授权书（虚构数据）
 ## 测试
 
 ```bash
-npm test                                    # node --test tests/
-node scripts/check-zero-deps.mjs            # 零依赖 + 安全红线
+npm test                                    # 单元测试：node --test tests/
+node scripts/verify.mjs                     # 运营级校验：28 项，含负向验证
+npm run check                               # 上面全部 + 零依赖红线
 node tests/cli.test.mjs                     # 单跑某个文件
 ```
 
-133 个测试，重点覆盖的不是"能存能读"，而是**篡改能不能被发现**：
+145 个单元测试，重点覆盖的不是"能存能读"，而是**篡改能不能被发现**：
 
 - 改内容 / 改时间 / 删中间条 / 换顺序 / 改 prevHash —— 逐项验证能检出并定位
 - **负向验证**：纯哈希链下"整链重算"确实能伪造成功（承认边界），
@@ -325,9 +327,33 @@ node tests/cli.test.mjs                     # 单跑某个文件
 - CLI 端到端：init 重复初始化被拒、check 不写日志、越界退出码 2、篡改退出码 3
 - 输入加固：目标名含 `|` 时报告表格不被撑破，由 `check-report-tables.mjs` 校验
 
-CI 有五个作业：单元测试与零依赖、端到端闭环、**篡改检测负向验证**、
-授权凭证守卫（四种坏凭证必须全被拒）、输入加固。
-其中"零依赖守卫本身有效"也做了负向验证 —— 一个永远通过的守卫等于没有守卫。
+`scripts/verify.mjs` 是运营级校验，四组共 28 项：端到端闭环、篡改检测、
+授权凭证守卫、安全红线。它的设计本身值得说一句 ——
+
+### 为什么校验逻辑不写在 workflow 的 bash 里
+
+本仓库第一次提交的 CI 挂了，两个作业失败，而**原因全在 YAML 里的 bash**：
+一个 `{ ...; fi` 括号写成 `}` 与 `fi` 混用，一个用了不在授权范围内的主机名
+（`log` 返回退出码 2，配合 `set -e` 直接中断循环）。与被测代码无关。
+
+更根本的问题是：那些 bash 片段**在本地跑不了**（受限环境下 bash 起不来），
+于是只能"推上去等 CI 告诉你"，一次反馈一轮往返。
+
+改成 `node scripts/verify.mjs` 之后：
+
+- 本地一条命令跑完全部校验，推之前就知道结果
+- 本地与 CI 执行的是同一份代码，不存在"CI 上才有的问题"
+- 没有 bash 引号/括号/`set -e` 这一类与被测逻辑无关的失败模式
+
+CI 本身因此薄到只剩两条命令：`node --test tests/` 与 `node scripts/verify.mjs`。
+
+### 守卫的守卫
+
+`verify.mjs` 的 D 组专门验证"守卫本身有效"：
+往一份**临时副本**里塞第三方依赖、削掉 `ransomware`、删掉整份禁止清单、
+放开裸 `--hmac-key` —— 每一项都必须被 `check-zero-deps.mjs` 抓出来。
+**一个永远通过的守卫等于没有守卫**，所以守卫也要被负向验证，
+而负向验证必须在副本上做，不能靠临时改真实文件。
 
 ---
 

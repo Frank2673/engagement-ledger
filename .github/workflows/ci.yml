@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 jobs:
-  # ========== 1. 单元测试（全部离线，无网络） ==========
+  # ========== 1. 单元测试（全部离线） ==========
   test:
     name: 单元测试与零依赖校验
     runs-on: ubuntu-latest
@@ -27,37 +27,19 @@ jobs:
       - name: 运行测试套件
         run: node --test tests/
 
-      - name: 零依赖校验
+      - name: 零依赖与安全红线校验
         run: node scripts/check-zero-deps.mjs
 
-      - name: 守卫本身必须有效（负向验证）
-        run: |
-          # 零依赖校验若永远通过，它就只是装饰。往 src/ 塞一个引用第三方模块的文件，
-          # 校验必须失败；删掉后必须恢复通过。
-          cat > src/__guard_probe.mjs <<'EOF'
-          import lodash from 'lodash';
-          export default lodash;
-          EOF
-
-          set +e
-          node scripts/check-zero-deps.mjs > /tmp/guard.log 2>&1
-          code=$?
-          set -e
-          cat /tmp/guard.log
-          rm -f src/__guard_probe.mjs
-
-          if [ "$code" -eq 0 ]; then
-            echo "❌ 引入了第三方依赖，零依赖校验却通过了 —— 守卫失效"
-            exit 1
-          fi
-          grep -q "lodash" /tmp/guard.log || { echo "❌ 报错未指出具体模块"; exit 1; }
-
-          node scripts/check-zero-deps.mjs
-          echo "✅ 零依赖守卫确实能拦住违规"
-
-  # ========== 2. 端到端闭环：授权 → 放行 → 拦截 → 自证 ==========
-  e2e:
-    name: 端到端闭环
+  # ========== 2. 运营级校验 ==========
+  # 这一整个作业就是一条命令：node scripts/verify.mjs
+  #
+  # 为什么不把校验写成这里的一堆 bash 片段：那些片段在本地跑不了（受限环境下
+  # bash 起不来），于是只能"推上去等 CI 告诉你"。本仓库第一次提交就是这样挂的 ——
+  # 两个失败全出在 YAML 里的 bash（一个 `{ ...; fi` 括号写错，一个用了不在
+  # 授权范围内的主机名），与被测代码无关。搬到 Node 脚本后，同一条命令在本地与
+  # CI 结果必然一致，本地就能先跑完再推。
+  verify:
+    name: 运营级校验（端到端 + 篡改检测 + 凭证守卫 + 红线）
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -66,272 +48,13 @@ jobs:
         with:
           node-version: '20'
 
-      - name: 用示例凭证初始化日志
-        run: |
-          node src/index.mjs init --manifest fixtures/demo-engagement.json --ledger /tmp/ledger.jsonl
+      - name: 运营级校验
+        run: node scripts/verify.mjs --artifacts ./evidence
 
-      - name: 范围内的动作必须放行（退出码 0）
-        run: |
-          set +e
-          node src/index.mjs log \
-            --manifest fixtures/demo-engagement.json --ledger /tmp/ledger.jsonl \
-            --target api.example.com --action recon --result "12 endpoints" > /tmp/allow.log 2>&1
-          code=$?
-          set -e
-          cat /tmp/allow.log
-          if [ "$code" -ne 0 ]; then echo "❌ 授权内动作被拒，期望 0 实际 $code"; exit 1; fi
-          grep -q "✅ 允许执行" /tmp/allow.log
-
-      - name: 越界目标必须被拒（退出码 2）
-        run: |
-          set +e
-          node src/index.mjs log \
-            --manifest fixtures/demo-engagement.json --ledger /tmp/ledger.jsonl \
-            --target pay.example.com --action scan > /tmp/deny.log 2>&1
-          code=$?
-          set -e
-          cat /tmp/deny.log
-          if [ "$code" -ne 2 ]; then echo "❌ 越界动作未被拒，期望 2 实际 $code"; exit 1; fi
-          grep -q "排除优先级高于纳入" /tmp/deny.log
-          grep -q "未执行" /tmp/deny.log
-
-      - name: 硬性禁止动作必须被拒（任何授权都不放行）
-        run: |
-          set +e
-          node src/index.mjs log \
-            --manifest fixtures/demo-engagement.json --ledger /tmp/ledger.jsonl \
-            --target api.example.com --action ransomware > /tmp/hard.log 2>&1
-          code=$?
-          set -e
-          cat /tmp/hard.log
-          if [ "$code" -ne 2 ]; then echo "❌ 硬性禁止动作未被拒，期望 2 实际 $code"; exit 1; fi
-          grep -q "硬性禁止项" /tmp/hard.log
-
-      - name: 授权窗口之外必须被拒
-        run: |
-          set +e
-          node src/index.mjs check \
-            --manifest fixtures/demo-engagement.json \
-            --target api.example.com --action recon --at 2027-01-01T00:00:00Z > /tmp/window.log 2>&1
-          code=$?
-          set -e
-          cat /tmp/window.log
-          if [ "$code" -ne 2 ]; then echo "❌ 窗口外的动作未被拒，期望 2 实际 $code"; exit 1; fi
-          grep -q "超出授权窗口" /tmp/window.log
-
-      - name: 链完整性校验必须通过
-        run: node src/index.mjs verify --ledger /tmp/ledger.jsonl
-
-      - name: 生成合规报告并断言关键内容
-        run: |
-          node src/index.mjs report \
-            --manifest fixtures/demo-engagement.json --ledger /tmp/ledger.jsonl \
-            --out /tmp/report.md --json /tmp/report.json
-
-          for needle in "越界尝试与被拒记录" "pay.example.com" "哈希链完整" "篡改可发现 ≠ 不可伪造" "外部锚定"; do
-            grep -q "$needle" /tmp/report.md || { echo "❌ 报告缺少：$needle"; exit 1; }
-          done
-          echo "✅ 报告内容齐全"
-
-          node -e "
-            const fs = require('node:fs');
-            const r = JSON.parse(fs.readFileSync('/tmp/report.json', 'utf8'));
-            if (r.statistics.decisions.denied !== 2) { console.error('❌ 应记录 2 次拒绝，实际 ' + r.statistics.decisions.denied); process.exit(1); }
-            if (r.integrity.chainOk !== true) { console.error('❌ JSON 报告显示链不完整'); process.exit(1); }
-            if (r.engagement.id !== 'ENG-2026-DEMO-001') { console.error('❌ 委托编号丢失'); process.exit(1); }
-            console.log('✅ JSON 报告统计正确：拒绝 ' + r.statistics.decisions.denied + ' 次');
-          "
-
-      - name: 把锚定行写入仓库锚定文件（演示锚定流程）
-        run: |
-          node src/index.mjs anchor --ledger /tmp/ledger.jsonl
-          node src/index.mjs anchor --ledger /tmp/ledger.jsonl | grep '^  engagement-ledger' | sed 's/^  //' > /tmp/anchor.txt
-          cat /tmp/anchor.txt
-          grep -Eq '^engagement-ledger [0-9]+ [a-f0-9]{64}$' /tmp/anchor.txt || { echo "❌ 锚定行格式不正确"; exit 1; }
-
-      - name: 上传报告与日志作为构建产物
+      - name: 上传证据产物
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: engagement-evidence
-          path: |
-            /tmp/report.md
-            /tmp/report.json
-            /tmp/ledger.jsonl
+          path: evidence/
           retention-days: 30
-
-  # ========== 3. 篡改必须被发现（这是本项目的核心承诺，必须真验） ==========
-  tamper-detection:
-    name: 篡改检测负向验证
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: 准备一份日志
-        run: |
-          node src/index.mjs init --manifest fixtures/demo-engagement.json --ledger /tmp/l.jsonl
-          node src/index.mjs log \
-            --manifest fixtures/demo-engagement.json --ledger /tmp/l.jsonl \
-            --target pay.example.com --action scan > /dev/null 2>&1 || true
-          node src/index.mjs verify --ledger /tmp/l.jsonl
-
-      - name: 改动一条记录的内容后必须检出
-        run: |
-          node -e "
-            const fs = require('node:fs');
-            const lines = fs.readFileSync('/tmp/l.jsonl', 'utf8').trim().split('\n');
-            const e = JSON.parse(lines[1]);
-            e.target = 'api.example.com';   // 把越界目标改成范围内的，试图掩盖
-            lines[1] = JSON.stringify(e);
-            fs.writeFileSync('/tmp/l.jsonl', lines.join('\n') + '\n');
-          "
-
-          set +e
-          node src/index.mjs verify --ledger /tmp/l.jsonl > /tmp/tamper.log 2>&1
-          code=$?
-          set -e
-          cat /tmp/tamper.log
-
-          if [ "$code" -ne 3 ]; then echo "❌ 日志被改动却未检出，期望退出码 3 实际 $code"; exit 1; fi
-          grep -q "哈希链校验失败" /tmp/tamper.log
-          grep -q "不可作为合规证据使用" /tmp/tamper.log
-          echo "✅ 内容篡改被检出"
-
-      - name: 删掉中间一条记录后必须检出
-        run: |
-          node src/index.mjs init --manifest fixtures/demo-engagement.json --ledger /tmp/l2.jsonl
-          for host in a.example.com b.example.com c.example.com; do
-            node src/index.mjs log --manifest fixtures/demo-engagement.json --ledger /tmp/l2.jsonl \
-              --target "$host" --action recon > /dev/null
-          done
-
-          node -e "
-            const fs = require('node:fs');
-            const lines = fs.readFileSync('/tmp/l2.jsonl', 'utf8').trim().split('\n');
-            lines.splice(2, 1);   // 抽掉中间一条
-            fs.writeFileSync('/tmp/l2.jsonl', lines.join('\n') + '\n');
-          "
-
-          set +e
-          node src/index.mjs verify --ledger /tmp/l2.jsonl > /tmp/delete.log 2>&1
-          code=$?
-          set -e
-          cat /tmp/delete.log
-
-          if [ "$code" -ne 3 ]; then echo "❌ 记录被删除却未检出，期望 3 实际 $code"; exit 1; fi
-          grep -q "序号不连续" /tmp/delete.log
-          echo "✅ 记录删除被检出"
-
-      - name: 启用 HMAC 后，不带密钥的校验必须失败
-        run: |
-          export ENGAGEMENT_LEDGER_KEY='ci-test-key-do-not-reuse'
-          node src/index.mjs init --manifest fixtures/demo-engagement.json --ledger /tmp/l3.jsonl
-
-          # 带密钥：通过
-          node src/index.mjs verify --ledger /tmp/l3.jsonl --hmac-key-env ENGAGEMENT_LEDGER_KEY
-
-          # 不带密钥：必须失败（说明确实签了名）
-          set +e
-          node src/index.mjs verify --ledger /tmp/l3.jsonl > /tmp/nokey.log 2>&1
-          code=$?
-          set -e
-          cat /tmp/nokey.log
-
-          if [ "$code" -ne 3 ]; then echo "❌ 不带密钥校验 HMAC 链却通过了 —— 签名失效"; exit 1; fi
-          echo "✅ HMAC 签名确实生效"
-
-  # ========== 4. 凭证质量守卫：弱凭证与危险凭证必须被拒绝 ==========
-  manifest-guard:
-    name: 授权凭证守卫
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: 准备四种「坏凭证」
-        run: |
-          mkdir -p /tmp/bad
-          # 1. 没有授权段
-          cat > /tmp/bad/no-auth.json <<'EOF'
-          {"engagement":{"id":"X","tester":"t","window":{"from":"2026-01-01T00:00:00Z","to":"2026-12-31T00:00:00Z"},"scope":{"inScope":["a.example.com"]}}}
-          EOF
-          # 2. 把硬性禁止动作写进允许清单
-          cat > /tmp/bad/permit-ransomware.json <<'EOF'
-          {"engagement":{"id":"X","tester":"t","authorization":{"reference":"R","signedBy":"S"},"window":{"from":"2026-01-01T00:00:00Z","to":"2026-12-31T00:00:00Z"},"scope":{"inScope":["a.example.com"]},"permittedActions":["ransomware"]}}
-          EOF
-          # 3. 空范围
-          cat > /tmp/bad/empty-scope.json <<'EOF'
-          {"engagement":{"id":"X","tester":"t","authorization":{"reference":"R","signedBy":"S"},"window":{"from":"2026-01-01T00:00:00Z","to":"2026-12-31T00:00:00Z"},"scope":{"inScope":[]}}}
-          EOF
-          # 4. 没有时间窗
-          cat > /tmp/bad/no-window.json <<'EOF'
-          {"engagement":{"id":"X","tester":"t","authorization":{"reference":"R","signedBy":"S"},"scope":{"inScope":["a.example.com"]}}}
-          EOF
-
-      - name: 四种坏凭证必须全部被拒绝，且报错指向具体原因
-        run: |
-          check() {
-            file="$1"; expect="$2"; label="$3"
-            set +e
-            node src/index.mjs init --manifest "$file" --ledger /tmp/never.jsonl > /tmp/bad.log 2>&1
-            code=$?
-            set -e
-            cat /tmp/bad.log
-            if [ "$code" -eq 0 ]; then echo "❌ $label：坏凭证竟然通过了"; exit 1; fi
-            grep -q "$expect" /tmp/bad.log || { echo "❌ $label：报错未指出原因（期望包含「$expect」）"; exit 1; fi
-            echo "✅ $label 被正确拒绝"
-          }
-
-          check /tmp/bad/no-auth.json          "authorization"  "缺少授权段"
-          check /tmp/bad/permit-ransomware.json "硬性禁止"        "把硬性禁止动作列入允许清单"
-          check /tmp/bad/empty-scope.json      "inScope"         "空范围"
-          check /tmp/bad/no-window.json        "window"          "缺少时间窗"
-
-      - name: 坏凭证不应留下半个日志文件
-        run: |
-          if [ -f /tmp/never.jsonl ]; then echo "❌ 凭证校验失败却产生了日志文件"; exit 1; fi
-          echo "✅ 校验失败时未产生日志"
-
-  # ========== 5. 换行/注入类输入不应破坏报告结构 ==========
-  input-hardening:
-    name: 输入加固（表格注入与超长输入）
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: 目标名里带竖线时，报告表格结构不被破坏
-        run: |
-          node src/index.mjs init --manifest fixtures/demo-engagement.json --ledger /tmp/i.jsonl
-
-          # 目标名来自外部输入；带竖线若不转义会把 Markdown 表格撑破
-          set +e
-          node src/index.mjs log \
-            --manifest fixtures/demo-engagement.json --ledger /tmp/i.jsonl \
-            --action recon --target 'evil.com|injected' > /dev/null 2>&1
-          code=$?
-          set -e
-          if [ "$code" -ne 2 ]; then echo "❌ 范围外目标未被拒，期望 2 实际 $code"; exit 1; fi
-
-          node src/index.mjs report \
-            --manifest fixtures/demo-engagement.json --ledger /tmp/i.jsonl \
-            --out /tmp/inject.md
-
-          grep -q 'evil.com\\|injected' /tmp/inject.md || {
-            echo "❌ 竖线未被转义，报告表格会被撑破"
-            grep -n 'injected' /tmp/inject.md || true
-            exit 1
-          }
-          echo "✅ 表格注入被正确转义"
-
-      - name: 报告表格列数一致（转义后仍未错位）
-        run: node scripts/check-report-tables.mjs /tmp/inject.md
