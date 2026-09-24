@@ -7,6 +7,7 @@ out/
 # 运行产物：演示日志与生成的报告含委托信息，不应进版本控制
 demo/
 ledger/
+evidence/
 *.jsonl
 compliance-report.md
 report.json
