@@ -27,6 +27,7 @@ import { runChecks, DEFAULT_ROOT } from './check-zero-deps.mjs';
 import { checkTables } from './check-report-tables.mjs';
 import { appendEntry } from '../src/lib/ledger.mjs';
 import { intakeAuthorization } from './intake-authorization.mjs';
+import { computeEntryHash, GENESIS_HASH } from '../src/lib/crypto.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -309,7 +310,10 @@ check('B3 链断裂时 anchor 拒绝给出可锚定的哈希', () => {
 
     const r = runCli(['anchor', '--ledger', S.ledger]);
     assert.equal(r.code, 3);
-    assert.match(r.stdout, /BROKEN/);
+    /* 链坏时不给出锚定行 —— 锚定一份坏链只会把坏数据钉进外部记录 */
+    assert.match(r.stdout, /链已断裂，不给出锚定行/);
+    assert.match(r.stdout, /锚定一份坏链只会把坏数据钉进外部记录/);
+    assert.ok(!/^ {2}engagement-ledger \d+ [a-f0-9]{64}$/m.test(r.stdout), '不应输出任何可用锚定行');
   } finally {
     S.cleanup();
   }
@@ -441,10 +445,134 @@ check('B8 落在授权窗口之外的已执行动作会被检出', () => {
   }
 });
 
+check('B9 整链重写：verify 会通过，但锚定能抓住（核心能力实测）', () => {
+  const S = makeEngagement('b9');
+  try {
+    const anchorsPath = join(S.dir, 'ANCHORS.txt');
+
+    /* 1. 建一份含"越界被拒"记录的日志，并锚定 */
+    runCli(['init', '--manifest', S.manifest, '--ledger', S.ledger]);
+    runCli(['log', '--manifest', S.manifest, '--ledger', S.ledger,
+      '--target', 'api.example.com', '--action', 'recon', '--evidence', 'logs/a.txt', '--at', AT]);
+    runCli(['log', '--manifest', S.manifest, '--ledger', S.ledger,
+      '--target', 'pay.example.com', '--action', 'scan', '--at', AT]);
+
+    const anchored = runCli(['anchor', '--ledger', S.ledger, '--append', anchorsPath]);
+    assert.equal(anchored.code, 0, anchored.stderr);
+    assert.match(anchored.stdout, /已追加锚定行/);
+
+    /* 幂等：同一状态重复锚定不该把文件撑大 */
+    const again = runCli(['anchor', '--ledger', S.ledger, '--append', anchorsPath]);
+    assert.match(again.stdout, /已经锚定过/);
+    assert.equal(readFileSync(anchorsPath, 'utf8').trim().split('\n').length, 1);
+
+    /* 2. 攻击前：锚定校验通过，且链头一致 */
+    const before = runCli(['verify-anchor', '--ledger', S.ledger, '--anchors', anchorsPath]);
+    assert.equal(before.code, 0, before.stdout);
+    assert.match(before.stdout, /最新锚定与当前链头完全一致/);
+
+    /* 3. 攻击：掩改越界记录，然后把整条链从头重算 —— 攻击者知道算法 */
+    const entries = logLines(S.ledger);
+    const victim = entries.find((e) => e.decision === 'denied');
+    assert.ok(victim, '应存在一条被拒记录作为掩改目标');
+    victim.target = 'api.example.com';
+    victim.decision = 'allowed';
+    victim.result = 'executed';
+
+    let prev = GENESIS_HASH;
+    for (const entry of entries) {
+      entry.prevHash = prev;
+      entry.hash = computeEntryHash(entry, prev);
+      prev = entry.hash;
+    }
+    writeFileSync(S.ledger, entries.map((e) => JSON.stringify(e)).join('\n') + '\n', 'utf8');
+
+    /* 4. 关键对照：单看日志，链条完全自洽 —— verify 放行 */
+    const chainOnly = runCli(['verify', '--ledger', S.ledger]);
+    assert.equal(chainOnly.code, 0, '重算后的链必须自洽（这正是攻击成立的前提）');
+    assert.match(chainOnly.stdout, /哈希链完整/);
+
+    /* 5. 与外部锚定比对才抓得住 —— 这才是锚定存在的全部理由 */
+    const caught = runCli(['verify-anchor', '--ledger', S.ledger, '--anchors', anchorsPath]);
+    assert.equal(caught.code, 3, `锚定应抓住整链重写，实际 ${caught.code}`);
+    assert.match(caught.stdout, /这段历史被重写过/);
+    assert.match(caught.stdout, /整链被重算替换的特征|整条链被重新算过一遍/);
+    assert.match(caught.stdout, /核对 git 历史/);
+  } finally {
+    S.cleanup();
+  }
+});
+
+check('B10 末尾截断（回滚）会被锚定发现', () => {
+  const S = makeEngagement('b10');
+  try {
+    const anchorsPath = join(S.dir, 'ANCHORS.txt');
+    runCli(['init', '--manifest', S.manifest, '--ledger', S.ledger]);
+    for (const t of ['api.example.com', 'staging.example.com', '192.0.2.5']) {
+      const r = runCli(['log', '--manifest', S.manifest, '--ledger', S.ledger,
+        '--target', t, '--action', 'recon', '--evidence', 'logs/x.txt', '--at', AT]);
+      assert.equal(r.code, 0, `${t} 应在授权范围内`);
+    }
+    runCli(['anchor', '--ledger', S.ledger, '--append', anchorsPath]);
+
+    /* 砍掉最后两条 —— 截断后的链本身依然自洽 */
+    const lines = readFileSync(S.ledger, 'utf8').trim().split('\n');
+    writeFileSync(S.ledger, lines.slice(0, -2).join('\n') + '\n', 'utf8');
+
+    const chainOnly = runCli(['verify', '--ledger', S.ledger]);
+    assert.equal(chainOnly.code, 0, '截断后链条仍自洽 —— 单看日志发现不了');
+
+    const caught = runCli(['verify-anchor', '--ledger', S.ledger, '--anchors', anchorsPath]);
+    assert.equal(caught.code, 3);
+    assert.match(caught.stdout, /被截断或回滚/);
+  } finally {
+    S.cleanup();
+  }
+});
+
+check('B11 锚定文件缺失或无效时明确报错，不静默通过', () => {
+  const S = makeEngagement('b11');
+  try {
+    runCli(['init', '--manifest', S.manifest, '--ledger', S.ledger]);
+
+    /* 文件不存在 */
+    const missing = runCli(['verify-anchor', '--ledger', S.ledger, '--anchors', join(S.dir, 'nope.txt')]);
+    assert.equal(missing.code, 1, '缺文件应报用法错误');
+    assert.match(missing.stderr, /找不到锚定文件/);
+
+    /* 文件存在但没有可用锚定记录 */
+    const emptyPath = join(S.dir, 'empty.txt');
+    writeFileSync(emptyPath, '# 只有注释\n无关说明文字\n', 'utf8');
+    const empty = runCli(['verify-anchor', '--ledger', S.ledger, '--anchors', emptyPath]);
+    assert.equal(empty.code, 3, '没有锚定等于没有发现整链重写的手段');
+    assert.match(empty.stdout, /没有任何可用的锚定记录/);
+    assert.match(empty.stdout, /单看日志永远看不出/);
+  } finally {
+    S.cleanup();
+  }
+});
+
+check('B12 链断裂时不给出锚定行（不把坏数据钉进外部记录）', () => {
+  const S = makeEngagement('b12');
+  try {
+    runCli(['init', '--manifest', S.manifest, '--ledger', S.ledger]);
+    const genesis = JSON.parse(readFileSync(S.ledger, 'utf8').trim());
+    genesis.actor = 'mallory';
+    writeFileSync(S.ledger, JSON.stringify(genesis) + '\n', 'utf8');
+
+    const anchorsPath = join(S.dir, 'ANCHORS.txt');
+    const r = runCli(['anchor', '--ledger', S.ledger, '--append', anchorsPath]);
+    assert.equal(r.code, 3);
+    assert.match(r.stdout, /不给出锚定行/);
+    assert.ok(!existsSync(anchorsPath), '不应写出任何锚定行');
+  } finally {
+    S.cleanup();
+  }
+});
+
 /* ============================ C. 授权凭证守卫 ============================ */
 
 group('\nC. 授权凭证守卫（坏凭证必须被拒绝）');
-
 const BAD_MANIFESTS = [
   {
     name: '缺少 authorization 段',

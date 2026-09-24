@@ -215,6 +215,162 @@ function summarize(entry) {
  * @param {Array<object>} entries
  * @returns {{ok: boolean, expected: string, foreign: Array, untagged: Array}}
  */
+
+/* ===================== 外部锚定：写入与校验 ===================== */
+
+/** 锚定行的标签 */
+export const ANCHOR_LABEL = 'engagement-ledger';
+
+/** 锚定行格式：<标签> <条数> <链头哈希> */
+const ANCHOR_LINE_RE = new RegExp(`^${ANCHOR_LABEL}\\s+(\\d+)\\s+([a-f0-9]{64})$`, 'i');
+
+/**
+ * 生成一行锚定记录
+ * @param {number} entryCount
+ * @param {string} headHash
+ */
+export function formatAnchorLine(entryCount, headHash) {
+  return `${ANCHOR_LABEL} ${entryCount} ${headHash}`;
+}
+
+/**
+ * 从锚定文件内容里解析出锚定记录
+ *
+ * 宽松解析：忽略空行、注释行（# 开头）与行内说明文字 ——
+ * ANCHORS.txt 是给人看的文件，混进说明文字不该让校验整体失效。
+ *
+ * @param {string} text
+ * @returns {{anchors: Array<{line:number, entryCount:number, headHash:string, raw:string}>, malformed: Array<{line:number, raw:string}>}}
+ */
+export function parseAnchors(text) {
+  const anchors = [];
+  const malformed = [];
+
+  for (const [i, rawLine] of String(text ?? '').split(/\r?\n/).entries()) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+
+    const m = line.match(ANCHOR_LINE_RE);
+    if (!m) {
+      /* 含标签但不是合法锚定行的，当作格式错误提示；完全无关的文字忽略 */
+      if (line.includes(ANCHOR_LABEL)) malformed.push({ line: i + 1, raw: line });
+      continue;
+    }
+    anchors.push({ line: i + 1, entryCount: Number(m[1]), headHash: m[2].toLowerCase(), raw: line });
+  }
+
+  return { anchors, malformed };
+}
+
+/**
+ * 用外部锚定记录校验当前日志
+ *
+ * 这是**唯一能发现"整链被重写"的检查** —— 哈希链本身是自洽的，
+ * 单看日志永远看不出它被人从头算过一遍。只有把历史锚定点的哈希
+ * 与当前日志重新算出来的哈希比对，才能发现改写。
+ *
+ * 三种结论：
+ *   - 历史锚定点对不上 → **整链被重写**（最严重）
+ *   - 锚定条数 > 当前条数 → **日志被截断/回滚**
+ *   - 全部匹配且最新锚定等于当前链头 → 自锚定以来未被改动
+ *   - 全部匹配但当前条数更大 → 锚定之后有新增（正常，但报告应重新锚定）
+ *
+ * @param {Array<object>} entries 当前日志
+ * @param {Array<{entryCount:number, headHash:string}>} anchors 锚定记录
+ * @param {object} [options]
+ * @param {string|null} [options.hmacKey]
+ * @returns {{ok: boolean, checked: number, results: Array, latestCleared: boolean, reasons: string[]}}
+ */
+export function checkAnchors(entries, anchors, options = {}) {
+  const results = [];
+  const reasons = [];
+
+  for (const anchor of anchors) {
+    const { entryCount, headHash } = anchor;
+
+    if (entryCount > entries.length) {
+      results.push({
+        ...anchor,
+        status: 'rollback',
+        detail: `锚定时有 ${entryCount} 条记录，当前只有 ${entries.length} 条 —— 日志被截断或回滚过`,
+      });
+      reasons.push(`第 ${entryCount} 条的锚定点要求日志至少有 ${entryCount} 条记录，但当前只有 ${entries.length} 条`);
+      continue;
+    }
+
+    if (entryCount === 0) {
+      /* 空日志锚定：链头是创世哈希 */
+      const ok = headHash === GENESIS_HASH;
+      results.push({
+        ...anchor,
+        status: ok ? 'match' : 'rewritten',
+        detail: ok ? '空日志的锚定点匹配' : `空日志锚定点期望创世哈希，实际要的是 ${headHash}`,
+      });
+      if (!ok) reasons.push('空日志锚定点不匹配');
+      continue;
+    }
+
+    /* 对当前日志的前 entryCount 条重算链条，取出那一时刻的链头 */
+    const prefix = entries.slice(0, entryCount);
+    const verification = verifyLedger(prefix, options);
+
+    if (!verification.ok) {
+      results.push({
+        ...anchor,
+        status: 'broken',
+        detail: `前 ${entryCount} 条记录自身校验失败（${verification.reason}）`,
+      });
+      reasons.push(`前 ${entryCount} 条记录哈希链断裂，无法与锚定点比对`);
+      continue;
+    }
+
+    if (verification.headHash === headHash) {
+      results.push({ ...anchor, status: 'match', detail: `前 ${entryCount} 条记录的链头与锚定一致` });
+    } else {
+      results.push({
+        ...anchor,
+        status: 'rewritten',
+        detail:
+          `前 ${entryCount} 条记录的链头是 ${verification.headHash.slice(0, 16)}…，` +
+          `而锚定的是 ${headHash.slice(0, 16)}… —— 这段历史被重写过`,
+      });
+      reasons.push(
+        `锚定点 #${entryCount} 对不上：日志本身自洽（哈希链完整），但与外部锚定记录冲突 —— ` +
+          `这是"整链被重算替换"的特征`
+      );
+    }
+  }
+
+  const currentHead = entries.length ? entries[entries.length - 1].hash : GENESIS_HASH;
+  const latest = anchors.length ? anchors[anchors.length - 1] : null;
+  const latestCleared = Boolean(latest && latest.entryCount === entries.length && latest.headHash === currentHead);
+
+  return {
+    ok: reasons.length === 0,
+    checked: anchors.length,
+    results,
+    latestCleared,
+    currentCount: entries.length,
+    currentHead,
+    reasons,
+  };
+}
+
+/**
+ * 委托归属一致性校验
+ *
+ * 每条记录都带 engagementId，但在此之前从没人核对过它们是否一致。
+ * 日志里混进另一次委托的记录（复制粘贴、共用日志路径、交接失误）时，
+ * 报告的统计与流水会静默地把两件事写成一件 —— 而报告是要交给客户的。
+ *
+ * 注意：这个检查发现不了「真的在两个目标上做了事却只在日志里写了一个委托」
+ * 的情况（那属于工具之外的行为，见 SECURITY.md §1.3）。它只保证：
+ * 已记录的内容在委托归属上是自洽的。
+ *
+ * @param {string} engagementId 本次委托编号
+ * @param {Array<object>} entries
+ * @returns {{ok: boolean, expected: string, foreign: Array, untagged: Array}}
+ */
 export function checkEngagementConsistency(engagementId, entries) {
   const expected = String(engagementId || '');
   const foreign = [];

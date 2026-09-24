@@ -449,7 +449,49 @@ test('anchor 在链断裂时返回 3 且不给出可锚定的哈希', () => {
     const { code, stdout } = run(['anchor', '--ledger', sb.ledgerPath]);
     assert.equal(code, 3);
     assert.ok(stdout.includes('校验失败，无法锚定'));
-    assert.ok(stdout.includes('BROKEN'));
+    assert.ok(stdout.includes('链已断裂，不给出锚定行'), '应明确拒绝输出锚定行');
+    assert.ok(
+      !/^ {2}engagement-ledger \d+ [a-f0-9]{64}$/m.test(stdout),
+      '不应输出任何可用的锚定行 —— 锚定坏链只会把坏数据钉进外部记录'
+    );
+  } finally {
+    sb.cleanup();
+  }
+});
+
+test('anchor --append 幂等：同一状态重复锚定不撑大文件', () => {
+  const sb = sandbox();
+  try {
+    const anchorsPath = join(sb.dir, 'ANCHORS.txt');
+    run(['init', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath]);
+
+    const first = run(['anchor', '--ledger', sb.ledgerPath, '--append', anchorsPath]);
+    assert.equal(first.code, 0);
+    assert.match(first.stdout, /已追加锚定行/);
+
+    const second = run(['anchor', '--ledger', sb.ledgerPath, '--append', anchorsPath]);
+    assert.match(second.stdout, /已经锚定过/);
+    assert.equal(readFileSync(anchorsPath, 'utf8').trim().split('\n').length, 1);
+
+    /* 有新记录之后应能再锚一次 */
+    run(['log', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath,
+      '--target', 'example.com', '--action', 'scan', '--at', AT]);
+    const third = run(['anchor', '--ledger', sb.ledgerPath, '--append', anchorsPath]);
+    assert.match(third.stdout, /已追加锚定行/);
+    assert.equal(readFileSync(anchorsPath, 'utf8').trim().split('\n').length, 2);
+  } finally {
+    sb.cleanup();
+  }
+});
+
+test('verify-anchor 在锚定文件缺失时报用法错误，不静默通过', () => {
+  const sb = sandbox();
+  try {
+    run(['init', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath]);
+    const { code, stderr } = run(['verify-anchor', '--ledger', sb.ledgerPath,
+      '--anchors', join(sb.dir, 'missing.txt')]);
+    assert.equal(code, 1);
+    assert.match(stderr, /找不到锚定文件/);
   } finally {
     sb.cleanup();
   }

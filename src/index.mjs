@@ -21,7 +21,17 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
 import { loadManifest, verifyAuthorizationDocument, NEVER_PERMITTED_ACTIONS } from './lib/manifest.mjs';
 import { evaluateAction } from './lib/gate.mjs';
-import { loadLedger, appendEntry, verifyLedger, anchorInfo, makeEntry, checkEngagementConsistency } from './lib/ledger.mjs';
+import {
+  loadLedger,
+  appendEntry,
+  verifyLedger,
+  anchorInfo,
+  makeEntry,
+  checkEngagementConsistency,
+  checkAnchors,
+  parseAnchors,
+  formatAnchorLine,
+} from './lib/ledger.mjs';
 import { buildReport, buildJsonReport, summarizeLedger, findOutOfWindowActions } from './lib/report.mjs';
 import { fileSha256 } from './lib/crypto.mjs';
 
@@ -44,9 +54,10 @@ const HELP = `engagement-ledger —— 授权凭证与防篡改审计日志
   init                       用凭证初始化日志，写入 genesis 记录
   check                      执行前校验：这次动作现在能不能做（不写日志）
   log                        校验并记录：允许则记为 action，拒绝则记为 decision=denied
-  verify                     校验日志哈希链完整性
+  verify                     校验日志哈希链完整性 + 委托归属
+  verify-anchor              用外部锚定记录校验 —— 唯一能发现「整链被重写」的检查
   report                     生成合规报告（Markdown）
-  anchor                     输出外部锚定行（把链头哈希钉到日志之外）
+  anchor                     输出外部锚定行（加 --append <文件> 直接写入锚定文件）
   status                     一页纸概览
 
 通用选项：
@@ -71,12 +82,18 @@ report 选项：
   --json <路径>              同时输出机器可读 JSON
   --stdout                   打印到标准输出而不是写文件
 
+anchor / verify-anchor 选项：
+  --append <文件>            anchor 专用：直接追加锚定行（重复状态会跳过）
+  --anchors <文件>           verify-anchor 专用：锚定文件（默认 ANCHORS.txt）
+
 示例：
   engagement-ledger hash-doc 授权书.pdf
   engagement-ledger init
   engagement-ledger check --target api.example.com --action recon
   engagement-ledger log --target api.example.com --action recon --result "12 endpoints"
   engagement-ledger verify
+  engagement-ledger anchor --append ANCHORS.txt    # 锚定并提交进 git
+  engagement-ledger verify-anchor                  # 事后校验锚定是否仍然成立
   engagement-ledger report --stdout
 `;
 
@@ -106,6 +123,8 @@ function main(argv) {
       return cmdReport({ manifestPath, ledgerPath, options });
     case 'anchor':
       return cmdAnchor({ manifestPath, ledgerPath, options });
+    case 'verify-anchor':
+      return cmdVerifyAnchor({ ledgerPath, options });
     case 'status':
       return cmdStatus({ manifestPath, ledgerPath, options });
     default:
@@ -417,12 +436,115 @@ function cmdAnchor({ manifestPath, ledgerPath, options }) {
   process.stdout.write(`  链头哈希：${info.headHash || '校验失败，无法锚定'}\n`);
   process.stdout.write(`  起止时间：${info.firstTimestamp} ~ ${info.lastTimestamp}\n`);
   process.stdout.write(`  链状态　：${info.chainOk ? '✅ 完整' : '❌ 断裂'}\n\n`);
+
+  if (!info.chainOk) {
+    process.stdout.write(`链已断裂，不给出锚定行 —— 锚定一份坏链只会把坏数据钉进外部记录。\n`);
+    process.stdout.write(`先查明是谁在何时改动了日志，再锚定。\n`);
+    return EXIT.INTEGRITY;
+  }
+
+  /* --append：直接写入锚定文件，省掉 grep/sed 管道（手抄锚定行同样是失败模式） */
+  const appendTo = options.append;
+  if (typeof appendTo === 'string') {
+    const anchorsPath = resolve(appendTo);
+    const existing = existsSync(anchorsPath) ? readFileSync(anchorsPath, 'utf8') : '';
+    const parsed = parseAnchors(existing);
+    const line = formatAnchorLine(info.entryCount, info.headHash);
+
+    /* 幂等：同一状态重复锚定没有意义，只会把文件撑大 */
+    const last = parsed.anchors.at(-1);
+    if (last && last.entryCount === info.entryCount && last.headHash === info.headHash) {
+      process.stdout.write(`该状态已经锚定过（${anchorsPath} 的最后一行），未重复追加。\n`);
+      return EXIT.OK;
+    }
+
+    const prefix = existing && !existing.endsWith('\n') ? existing + '\n' : existing;
+    writeFileSync(anchorsPath, prefix + line + '\n', 'utf8');
+    process.stdout.write(`✅ 已追加锚定行到 ${anchorsPath}\n\n  ${line}\n\n`);
+    process.stdout.write(`下一步：把该文件提交进 git —— 提交之后，改写历史就会与 commit 冲突，\n`);
+    process.stdout.write(`替换整链即暴露。校验随时可用 verify-anchor。\n`);
+    return EXIT.OK;
+  }
+
   process.stdout.write(`建议锚定行（把它追加到 ANCHORS.txt 并提交进 git）：\n\n`);
   process.stdout.write(`  ${info.anchorLine}\n\n`);
+  process.stdout.write(`省事写法：加 --append ANCHORS.txt 直接写入（会跳过重复锚定）。\n\n`);
   process.stdout.write(`为什么需要锚定：哈希链能发现"改内容"，但发现不了"整份重算一遍再替换"。\n`);
   process.stdout.write(`把链头哈希提交进 git 之后，改写历史就会与这个 commit 冲突，替换整链即暴露。\n`);
+  process.stdout.write(`校验锚定是否仍然成立：verify-anchor --anchors ANCHORS.txt\n`);
 
-  return info.chainOk ? EXIT.OK : EXIT.INTEGRITY;
+  return EXIT.OK;
+}
+
+/**
+ * 用外部锚定记录校验日志 —— 这是唯一能发现"整链被重写"的检查
+ */
+function cmdVerifyAnchor({ ledgerPath, options }) {
+  const hmacKey = readHmacKey(options);
+  const entries = loadLedgerOrExit(ledgerPath);
+  if (!entries) return EXIT.ERROR;
+
+  const anchorsPath = resolve(
+    typeof options.anchors === 'string' ? options.anchors : 'ANCHORS.txt'
+  );
+  if (!existsSync(anchorsPath)) {
+    fail(
+      `找不到锚定文件：${anchorsPath}\n` +
+        `     先用 anchor --append ${options.anchors || 'ANCHORS.txt'} 生成一条，并提交进 git。`
+    );
+    return EXIT.ERROR;
+  }
+
+  const { anchors, malformed } = parseAnchors(readFileSync(anchorsPath, 'utf8'));
+
+  process.stdout.write(`锚定校验\n\n`);
+  process.stdout.write(`  日志文件：${ledgerPath}（${entries.length} 条记录）\n`);
+  process.stdout.write(`  锚定文件：${anchorsPath}（${anchors.length} 条锚定记录）\n\n`);
+
+  for (const m of malformed) {
+    process.stdout.write(`  ⚠️  第 ${m.line} 行格式无法解析，已跳过：${m.raw}\n`);
+  }
+  if (malformed.length) process.stdout.write('\n');
+
+  if (anchors.length === 0) {
+    process.stdout.write(`❌ 锚定文件里没有任何可用的锚定记录。\n\n`);
+    process.stdout.write(`   没有锚定，就无法发现"整链被重算替换" —— 哈希链本身是自洽的，\n`);
+    process.stdout.write(`   单看日志永远看不出它被人从头算过一遍。请先运行 anchor --append。\n`);
+    return EXIT.INTEGRITY;
+  }
+
+  const result = checkAnchors(entries, anchors, { hmacKey });
+
+  const mark = { match: '✓', rewritten: '✗', rollback: '✗', broken: '✗' };
+  for (const r of result.results) {
+    process.stdout.write(`  ${mark[r.status] || '?'} 锚定点 #${r.entryCount}（文件第 ${r.line} 行）\n`);
+    process.stdout.write(`      ${r.detail}\n`);
+  }
+  process.stdout.write('\n');
+
+  if (!result.ok) {
+    process.stdout.write(`❌ 锚定校验失败\n\n`);
+    for (const reason of result.reasons) process.stdout.write(`   ${reason}\n`);
+    process.stdout.write('\n');
+    process.stdout.write(`   **这是最严重的发现**：日志自身校验通过（内容前后自洽），\n`);
+    process.stdout.write(`   但与外部锚定记录冲突 —— 说明整条链被重新算过一遍。\n`);
+    process.stdout.write(`   请核对 git 历史里这些锚定行的提交时间与作者，追溯是谁做的。\n`);
+    return EXIT.INTEGRITY;
+  }
+
+  if (result.latestCleared) {
+    process.stdout.write(`✅ 最新锚定与当前链头完全一致\n\n`);
+    process.stdout.write(`   当前链头：${result.currentHead}\n`);
+    process.stdout.write(`   说明日志自最后一次锚定以来**没有被改动过**。\n`);
+    return EXIT.OK;
+  }
+
+  process.stdout.write(`✅ 全部 ${result.checked} 个锚定点都对得上，但当前链头尚未锚定\n\n`);
+  process.stdout.write(`   当前记录数：${result.currentCount}\n`);
+  process.stdout.write(`   当前链头　：${result.currentHead}\n`);
+  process.stdout.write(`   锚定之后有新记录写入（正常）。交付报告前请再锚定一次，\n`);
+  process.stdout.write(`   让"最终链头"也被外部记录钉住。\n`);
+  return EXIT.OK;
 }
 
 function cmdStatus({ manifestPath, ledgerPath, options }) {

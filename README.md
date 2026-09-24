@@ -10,7 +10,7 @@
 
 [![CI](https://github.com/Frank2673/engagement-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/Frank2673/engagement-ledger/actions/workflows/ci.yml)
 ![零依赖](https://img.shields.io/badge/运行时依赖-0-brightgreen)
-![测试](https://img.shields.io/badge/测试-222%20passed-brightgreen)
+![测试](https://img.shields.io/badge/测试-240%20passed-brightgreen)
 ![Node](https://img.shields.io/badge/node-%3E%3D20-blue)
 
 ---
@@ -174,19 +174,39 @@ input-complete → action-not-hard-forbidden → action-not-prohibited → actio
 解法是把链头哈希钉到日志文件**之外**的地方：
 
 ```bash
-# 1. 拿到锚定行
-node src/index.mjs anchor --ledger demo/ledger.jsonl
-#   engagement-ledger 4 fd657521184842bf9aba44806c90488bb1e4738a47c5c08fd149ea01c0634401
+# 1. 锚定：直接追加到 ANCHORS.txt（同一状态重复锚定会自动跳过）
+node src/index.mjs anchor --ledger demo/ledger.jsonl --append ANCHORS.txt
 
-# 2. 追加到锚定文件并提交（这个文件只含条数与哈希，不含委托信息，可以进仓库）
-node src/index.mjs anchor --ledger demo/ledger.jsonl \
-  | grep '^  engagement-ledger' | sed 's/^  //' >> ANCHORS.txt
+# 2. 提交进 git —— 这个文件只含条数与哈希，不含任何委托信息，可以进仓库
 git add ANCHORS.txt && git commit -m "chore: 锚定审计日志"
+
+# 3. 随时校验锚定是否仍然成立（这一步才算闭环）
+node src/index.mjs verify-anchor --ledger demo/ledger.jsonl --anchors ANCHORS.txt
 ```
 
-此后攻击者要伪造日志，就得同时面对 git 的历史 —— 这才真正锁住了链条。
+`verify-anchor` 是**唯一能发现「整链被重写」的检查**。实测对照（脚本在 CI 里每次都会重跑）：
 
-> ⚠️ 只把锚定行打印在同一个终端里，等于没锚定。攻击者重算整链时会顺带重算它。
+```console
+# 攻击者掩改了越界记录，然后把整条链从头重算一遍
+
+$ node src/index.mjs verify --ledger attack-ledger.jsonl
+✅ 哈希链完整          ← 单看日志，链条完全自洽，看不出任何问题
+
+$ node src/index.mjs verify-anchor --ledger attack-ledger.jsonl --anchors ANCHORS.txt
+  ✗ 锚定点 #4（文件第 1 行）
+      前 4 条记录的链头是 cdf1fd9aa50d003c…，而锚定的是 d17e2e965bd62f96… —— 这段历史被重写过
+
+❌ 锚定校验失败
+   **这是最严重的发现**：日志自身校验通过（内容前后自洽），
+   但与外部锚定记录冲突 —— 说明整条链被重新算过一遍。
+   请核对 git 历史里这些锚定行的提交时间与作者，追溯是谁做的。
+exit=3
+```
+
+末尾截断（回滚）同样会被发现：锚定条数大于当前条数即报 `被截断或回滚`。
+
+> ⚠️ 只把锚定行打印在同一个终端里，等于没锚定。攻击者重算整链时会顺带重算它 ——
+> **必须落到日志文件之外，并且有用它做校验的一步。**
 
 ### 启用 HMAC（可选，客户交付建议开）
 
@@ -277,8 +297,9 @@ node scripts/intake-authorization.mjs "D:\往来\AUTH-2026-001 签署版.pdf" \
 | `check` | 执行前试判（**不写日志**） | 0 / 2 |
 | `log` | 校验 + 记录（拒绝也记录） | 0 / 2 / 1 |
 | `verify` | 校验日志哈希链完整性 + 委托归属 | 0 / 3 |
+| `verify-anchor` | **用外部锚定校验** —— 唯一能发现整链重写的检查 | 0 / 3 |
 | `report` | 生成合规报告（Markdown / JSON） | 0 / 3 |
-| `anchor` | 输出外部锚定行 | 0 / 3 |
+| `anchor` | 输出/写入锚定行（`--append` 直接追加） | 0 / 3 |
 | `status` | 一页纸概览（授权状态 + 日志摘要） | 0 / 2 / 3 |
 
 通用选项：`--manifest <路径>`（默认 `engagement.json`）、
@@ -398,9 +419,9 @@ src/
     gate.mjs             执行前校验门（7 项判定 + 完整轨迹）
     ledger.mjs           哈希链日志：追加、校验、锚定信息、委托归属校验
     report.mjs           合规报告（Markdown + JSON）
-tests/                   222 个测试，8 个文件
+tests/                   240 个测试，9 个文件
 scripts/
-  verify.mjs                  运营级校验：本地与 CI 跑同一份代码（35 项）
+  verify.mjs                  运营级校验：本地与 CI 跑同一份代码（39 项）
   intake-authorization.mjs    授权书归档 + 算哈希 + 生成凭证片段
   check-zero-deps.mjs         零依赖 + 安全红线校验（CI 强制）
   check-report-tables.mjs     报告表格结构校验
@@ -426,12 +447,12 @@ fixtures/                示例凭证与示例授权书（虚构数据）
 
 ```bash
 npm test                                    # 单元测试：node --test tests/
-node scripts/verify.mjs                     # 运营级校验：35 项，含负向验证
+node scripts/verify.mjs                     # 运营级校验：39 项，含负向验证
 npm run check                               # 上面全部 + 零依赖红线
 node tests/cli.test.mjs                     # 单跑某个文件
 ```
 
-222 个单元测试，重点覆盖的不是"能存能读"，而是**篡改能不能被发现**：
+240 个单元测试，重点覆盖的不是"能存能读"，而是**篡改能不能被发现**：
 
 - 改内容 / 改时间 / 删中间条 / 换顺序 / 改 prevHash —— 逐项验证能检出并定位
 - **负向验证**：纯哈希链下"整链重算"确实能伪造成功（承认边界），
@@ -444,7 +465,7 @@ node tests/cli.test.mjs                     # 单跑某个文件
 - 窗口合规：窗口前 / 窗口后的动作都被找出，边界时刻（起止）不算越窗，`note` 不算
 - 输入加固：目标名含 `|` 时报告表格不被撑破，由 `check-report-tables.mjs` 校验
 
-`scripts/verify.mjs` 是运营级校验，四组共 35 项：端到端闭环、篡改检测与归属、
+`scripts/verify.mjs` 是运营级校验，四组共 39 项：端到端闭环、篡改检测与归属、
 授权凭证守卫、安全红线。它的设计本身值得说一句 ——
 
 ### 为什么校验逻辑不写在 workflow 的 bash 里
