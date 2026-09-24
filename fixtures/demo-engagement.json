@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "engagement": {
+    "id": "ENG-2026-DEMO-001",
+    "name": "示例科技对外服务渗透测试（演示数据）",
+    "client": "示例科技有限公司",
+    "tester": "Frank",
+    "authorization": {
+      "reference": "AUTH-2026-DEMO-001",
+      "signedBy": "张示例",
+      "signedTitle": "信息安全负责人",
+      "signedAt": "2026-09-01",
+      "document": "demo-authorization.md",
+      "documentSha256": "8c0b71f9b1abe2d9922500e6560ad5c87df4f8cb28b8cfb0ed277a9b4f6640e5"
+    },
+    "window": {
+      "from": "2026-09-01T09:00:00Z",
+      "to": "2026-12-31T18:00:00Z"
+    },
+    "scope": {
+      "inScope": [
+        "api.example.com",
+        "staging.example.com",
+        "192.0.2.0/28"
+      ],
+      "outOfScope": [
+        "pay.example.com",
+        "*.example.org"
+      ]
+    },
+    "permittedActions": [
+      "recon",
+      "scan",
+      "manual-test",
+      "config-review"
+    ],
+    "prohibitedActions": [
+      "dos",
+      "destructive",
+      "data-exfiltration",
+      "persistence",
+      "social-engineering"
+    ],
+    "emergencyContact": "security@example.com",
+    "notes": "演示凭证，域名与 IP 均为 RFC 文档示例地址，不对应任何真实资产。"
+  }
+}

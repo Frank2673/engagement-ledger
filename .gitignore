@@ -1,0 +1,29 @@
+# 依赖与构建产物
+node_modules/
+package-lock.json
+dist/
+out/
+
+# 运行产物：演示日志与生成的报告含委托信息，不应进版本控制
+demo/
+ledger/
+*.jsonl
+compliance-report.md
+report.json
+
+# 授权文件原件：可能含客户真实信息与手写签名，默认不入库。
+# 凭证里只登记它的 SHA-256 —— 那正是为了证明原件没被换过。
+authorization.pdf
+authorization.docx
+授权书*.pdf
+授权书*.docx
+
+# 编辑器与系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log

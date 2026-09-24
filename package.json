@@ -1,0 +1,36 @@
+{
+  "name": "engagement-ledger",
+  "version": "0.1.0",
+  "description": "授权凭证与防篡改审计日志 —— 让渗透测试的每一次动作都可自证",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "engagement-ledger": "src/index.mjs"
+  },
+  "scripts": {
+    "test": "node --test tests/",
+    "check:deps": "node scripts/check-zero-deps.mjs",
+    "check": "npm run check:deps && npm run test",
+    "hooks": "node scripts/setup-hooks.mjs",
+    "demo:init": "node src/index.mjs init --manifest fixtures/demo-engagement.json --ledger demo/ledger.jsonl",
+    "demo:log": "node src/index.mjs log --manifest fixtures/demo-engagement.json --ledger demo/ledger.jsonl",
+    "demo:verify": "node src/index.mjs verify --ledger demo/ledger.jsonl",
+    "demo:report": "node src/index.mjs report --manifest fixtures/demo-engagement.json --ledger demo/ledger.jsonl --stdout"
+  },
+  "keywords": [
+    "penetration-testing",
+    "audit-log",
+    "hash-chain",
+    "tamper-evident",
+    "compliance",
+    "rules-of-engagement",
+    "scope-enforcement",
+    "zero-dependency"
+  ],
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {}
+}
