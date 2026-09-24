@@ -17,6 +17,7 @@ import {
   verifyLedger,
   anchorInfo,
   writeLedger,
+  checkEngagementConsistency,
   LedgerError,
 } from '../src/lib/ledger.mjs';
 import { GENESIS_HASH, computeEntryHash } from '../src/lib/crypto.mjs';
@@ -379,4 +380,64 @@ test('中文内容在哈希链里往返无损（UTF-8 编码稳定）', () => {
   } finally {
     cleanup();
   }
+});
+
+/* ------------------------- 委托归属一致性 ------------------------- */
+
+test('全部记录属于同一委托时判定一致', () => {
+  const entries = [
+    { seq: 0, type: 'genesis', engagementId: 'ENG-1', timestamp: 't0' },
+    { seq: 1, type: 'action', engagementId: 'ENG-1', timestamp: 't1' },
+  ];
+  const r = checkEngagementConsistency('ENG-1', entries);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.foreign, []);
+});
+
+test('混入别的委托的记录会被发现（链完整也照样检出）', () => {
+  const entries = [
+    { seq: 0, type: 'genesis', engagementId: 'ENG-1', timestamp: 't0' },
+    { seq: 1, type: 'action', engagementId: 'ENG-1', action: 'recon', target: 'a.com' },
+    { seq: 2, type: 'action', engagementId: 'ENG-2', action: 'scan', target: 'b.com', timestamp: 't2' },
+  ];
+
+  const r = checkEngagementConsistency('ENG-1', entries);
+  assert.equal(r.ok, false);
+  assert.equal(r.foreign.length, 1);
+  assert.equal(r.foreign[0].seq, 2);
+  assert.equal(r.foreign[0].engagementId, 'ENG-2');
+  assert.equal(r.foreign[0].target, 'b.com');
+  assert.equal(r.expected, 'ENG-1');
+});
+
+test('委托编号按字符串比较（数字与字符串同值不算冲突）', () => {
+  const entries = [{ seq: 0, type: 'action', engagementId: 12345 }];
+  assert.equal(checkEngagementConsistency('12345', entries).ok, true);
+});
+
+test('未标注委托编号的记录进 untagged，不判为不一致', () => {
+  const entries = [
+    { seq: 0, type: 'genesis', engagementId: 'ENG-1' },
+    { seq: 1, type: 'note', timestamp: 't1' },
+  ];
+  const r = checkEngagementConsistency('ENG-1', entries);
+  assert.equal(r.ok, true, '未标注不等于属于别人');
+  assert.equal(r.untagged.length, 1);
+  assert.equal(r.untagged[0].seq, 1);
+});
+
+test('genesis 缺少编号时不进 untagged（它是建立日志的那条）', () => {
+  const entries = [{ seq: 0, type: 'genesis' }];
+  assert.deepEqual(checkEngagementConsistency('ENG-1', entries).untagged, []);
+});
+
+test('空日志视为一致', () => {
+  const r = checkEngagementConsistency('ENG-1', []);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.foreign, []);
+});
+
+test('单条记录属于别的委托也判为不一致（边界：1 条也不能放过）', () => {
+  const entries = [{ seq: 0, type: 'action', engagementId: 'OTHER' }];
+  assert.equal(checkEngagementConsistency('ENG-1', entries).ok, false);
 });

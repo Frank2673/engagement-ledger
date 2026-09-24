@@ -342,3 +342,53 @@ test('JSON 报告的授权窗口是 ISO 字符串（可跨语言消费）', () =
   const json = buildJsonReport({ manifest: manifest(), entries: entries() });
   assert.match(json.engagement.window.from, /^\d{4}-\d{2}-\d{2}T/);
 });
+
+/* ------------------------- 委托归属 ------------------------- */
+
+/** 造一份"混进了别的委托记录"的日志（链本身保持自洽） */
+function withForeignEntry() {
+  const list = entries();
+  list.push(makeEntry({
+    seq: 4, type: 'action', actor: 'someone', action: 'scan', target: 'other.example.com',
+    decision: 'allowed', result: 'merged', timestamp: '2026-09-03T09:00:00.000Z',
+  }));
+  list[4].engagementId = 'ENG-OTHER';
+  return reseal(list);
+}
+
+test('报告在委托归属异常时输出 5.1 节并列出外来记录', () => {
+  const md = buildReport({ manifest: manifest(), entries: withForeignEntry() });
+
+  assert.ok(md.includes('### 5.1 ⚠️ 委托归属异常'));
+  assert.ok(md.includes('`ENG-OTHER`'));
+  assert.ok(md.includes('不属于本次委托的证据范围'));
+  assert.ok(md.includes('不可直接交付客户'));
+  /* 链本身仍是完整的 —— 这正是该检查存在的理由 */
+  assert.ok(md.includes('✅ 哈希链完整'));
+});
+
+test('归属正常时不出现 5.1 节', () => {
+  const md = buildReport({ manifest: manifest(), entries: entries() });
+  assert.ok(!md.includes('委托归属异常'));
+});
+
+test('未标注编号的记录只给提示，不判为异常', () => {
+  const list = entries();
+  list.push(makeEntry({ seq: 4, type: 'note', actor: 'alice', reason: '手工备注', timestamp: '2026-09-03T09:00:00.000Z' }));
+  const md = buildReport({ manifest: manifest(), entries: reseal(list) });
+
+  assert.ok(!md.includes('委托归属异常'));
+  assert.ok(md.includes('未标注委托编号'));
+});
+
+test('JSON 报告带 consistency 字段，供下游系统判断可否交付', () => {
+  const foreign = buildJsonReport({ manifest: manifest(), entries: withForeignEntry() });
+  assert.equal(foreign.consistency.ok, false);
+  assert.equal(foreign.consistency.foreignCount, 1);
+  assert.equal(foreign.consistency.foreign[0].engagementId, 'ENG-OTHER');
+  assert.equal(foreign.consistency.expected, 'ENG-001');
+
+  const clean = buildJsonReport({ manifest: manifest(), entries: entries() });
+  assert.equal(clean.consistency.ok, true);
+  assert.equal(clean.consistency.foreignCount, 0);
+});

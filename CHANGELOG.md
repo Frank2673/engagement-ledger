@@ -37,6 +37,11 @@
   - 可选 HMAC-SHA256：把「篡改可发现」升级为「无密钥不可伪造」
   - 校验失败时精确定位到第几条，并拒绝给出可锚定的链头哈希
   - `recordedAt` 与 `backfilled` 标记，显式区分"事件何时发生"与"何时被记进日志"
+  - **委托归属校验**：`checkEngagementConsistency()` 检出日志里混入的其它委托记录。
+    链完整只说明"内容没被改"，不说明"这些内容都属于这次委托" ——
+    共用日志路径或合并日志会让报告的统计与流水把两件事写成一件
+  - 预防 + 检测两层：`log` 拒绝向属于另一次委托的日志追加（预防），
+    `verify` / `status` / `report` 检出已混入的记录（检测）
 
 - **合规报告（`src/lib/report.mjs`）**
   - Markdown 报告（七章）与机器可读 JSON 报告
@@ -54,9 +59,9 @@
 
 - **工程**
   - 零运行时依赖（仅 Node 内置模块），CI 强制校验
-  - 172 个单元测试，含篡改检测、HMAC、表格注入、IPv6、CLI 端到端
-  - `scripts/verify.mjs` 运营级校验 28 项（端到端闭环 / 篡改检测 /
-    凭证守卫 / 安全红线），本地与 CI 共用同一份代码
+  - 188 个单元测试，含篡改检测、HMAC、表格注入、IPv6、委托归属、CLI 端到端
+  - `scripts/verify.mjs` 运营级校验 32 项（端到端闭环 / 篡改检测 / 凭证守卫 /
+    委托归属 / 安全红线），本地与 CI 共用同一份代码
   - CI 薄到只剩两条命令：`node --test tests/` 与 `node scripts/verify.mjs`
   - 仓库内 git hooks（Conventional Commits）
 

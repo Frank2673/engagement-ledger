@@ -11,7 +11,7 @@
  * @module lib/report
  */
 
-import { verifyLedger, anchorInfo } from './ledger.mjs';
+import { verifyLedger, anchorInfo, checkEngagementConsistency } from './ledger.mjs';
 
 /**
  * 汇总统计数据
@@ -87,6 +87,7 @@ export function buildReport({ manifest, entries, hmacKey = null }) {
   const stats = summarizeLedger(entries);
   const verification = verifyLedger(entries, { hmacKey });
   const anchor = anchorInfo(entries, { hmacKey });
+  const consistency = checkEngagementConsistency(eng.id, entries);
   const now = new Date();
 
   const lines = [];
@@ -248,6 +249,37 @@ export function buildReport({ manifest, entries, hmacKey = null }) {
   }
   p();
 
+  /* 委托归属：链完整只说明"内容没被改"，不说明"这些内容都属于这次委托" */
+  if (!consistency.ok) {
+    p(`### 5.1 ⚠️ 委托归属异常`);
+    p();
+    p(
+      `以下 ${consistency.foreign.length} 条记录属于**别的委托**（本报告针对 \`${consistency.expected}\`）。` +
+        `它们仍在哈希链上（链本身是完整的），但**不属于本次委托的证据范围**：`
+    );
+    p();
+    p(`| # | 时间 | 动作 | 目标 | 实际所属委托 |`);
+    p(`| --- | --- | --- | --- | --- |`);
+    for (const f of consistency.foreign) {
+      p(
+        `| ${f.seq} | ${escapeCell(fmt(f.timestamp))} | \`${escapeCell(f.action || f.type)}\` | ` +
+          `${f.target ? `\`${escapeCell(f.target)}\`` : '—'} | \`${escapeCell(f.engagementId)}\` |`
+      );
+    }
+    p();
+    p(
+      `**处理方式**：确认本次委托的日志文件是否与另一次委托共用，或记录被误复制。` +
+        `在纠正之前，本报告的统计数字与动作流水都包含了不属于本次委托的内容，不可直接交付客户。`
+    );
+    p();
+  } else if (consistency.untagged.length > 0) {
+    p(
+      `> 提示：${consistency.untagged.length} 条记录未标注委托编号（seq ${consistency.untagged.map((u) => u.seq).join(', ')}）。` +
+        `不影响校验，但这些条目无法自动确认归属。`
+    );
+    p();
+  }
+
   /* ---- 6. 锚定 ---- */
   p(`## 6. 外部锚定（防整链替换）`);
   p();
@@ -294,6 +326,7 @@ export function buildReport({ manifest, entries, hmacKey = null }) {
  */
 export function buildJsonReport({ manifest, entries, hmacKey = null }) {
   const verification = verifyLedger(entries, { hmacKey });
+  const consistency = checkEngagementConsistency(manifest.engagement.id, entries);
   return {
     generatedAt: new Date().toISOString(),
     engagement: {
@@ -323,6 +356,14 @@ export function buildJsonReport({ manifest, entries, hmacKey = null }) {
       brokenAt: verification.brokenAt,
       reason: verification.reason,
       headHash: verification.headHash,
+    },
+    /* 委托归属：链完整 ≠ 这些记录都属于这次委托 */
+    consistency: {
+      ok: consistency.ok,
+      expected: consistency.expected,
+      foreignCount: consistency.foreign.length,
+      foreign: consistency.foreign,
+      untagged: consistency.untagged,
     },
     anchor: anchorInfo(entries, { hmacKey }),
     warnings: manifest.warnings || [],

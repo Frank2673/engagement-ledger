@@ -201,6 +201,50 @@ function summarize(entry) {
 }
 
 /**
+ * 委托归属一致性校验
+ *
+ * 每条记录都带 engagementId，但在此之前从没人核对过它们是否一致。
+ * 日志里混进另一次委托的记录（复制粘贴、共用日志路径、交接失误）时，
+ * 报告的统计与流水会静默地把两件事写成一件 —— 而报告是要交给客户的。
+ *
+ * 注意：这个检查发现不了「真的在两个目标上做了事却只在日志里写了一个委托」
+ * 的情况（那属于工具之外的行为，见 SECURITY.md §1.3）。它只保证：
+ * 已记录的内容在委托归属上是自洽的。
+ *
+ * @param {string} engagementId 本次委托编号
+ * @param {Array<object>} entries
+ * @returns {{ok: boolean, expected: string, foreign: Array, untagged: Array}}
+ */
+export function checkEngagementConsistency(engagementId, entries) {
+  const expected = String(engagementId || '');
+  const foreign = [];
+  const untagged = [];
+
+  for (const entry of entries) {
+    const id = entry.engagementId;
+    if (!id) {
+      /* genesis 之后产生的记录理应带委托编号；不带的多半是手工写入的条目 */
+      if (entry.type !== 'genesis') {
+        untagged.push({ seq: entry.seq, type: entry.type, timestamp: entry.timestamp });
+      }
+      continue;
+    }
+    if (String(id) !== expected) {
+      foreign.push({
+        seq: entry.seq,
+        type: entry.type,
+        timestamp: entry.timestamp,
+        engagementId: String(id),
+        action: entry.action || null,
+        target: entry.target || null,
+      });
+    }
+  }
+
+  return { ok: foreign.length === 0, expected, foreign, untagged };
+}
+
+/**
  * 锚定信息：给外部存储用的紧凑摘要
  */
 export function anchorInfo(entries, options = {}) {

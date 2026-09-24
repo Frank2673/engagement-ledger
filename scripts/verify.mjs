@@ -25,6 +25,7 @@ import assert from 'node:assert/strict';
 import { main } from '../src/index.mjs';
 import { runChecks, DEFAULT_ROOT } from './check-zero-deps.mjs';
 import { checkTables } from './check-report-tables.mjs';
+import { appendEntry } from '../src/lib/ledger.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -344,6 +345,58 @@ check('B5 补录记录被标记（区分事件时间与写入时间）', () => {
     const last = logLines(S.ledger).at(-1);
     assert.equal(last.backfilled, true);
     assert.ok(last.recordedAt, 'recordedAt 必须存在');
+  } finally {
+    S.cleanup();
+  }
+});
+
+check('B6 log 拒绝向属于另一次委托的日志追加记录（预防）', () => {
+  const A = makeEngagement('b6a');
+  const B = makeEngagement('b6b');
+  try {
+    /* 把第二份凭证的委托编号改掉，模拟"两次委托共用一个日志路径" */
+    const second = JSON.parse(readFileSync(B.manifest, 'utf8'));
+    second.engagement.id = 'ENG-OTHER-999';
+    writeFileSync(B.manifest, JSON.stringify(second), 'utf8');
+
+    runCli(['init', '--manifest', A.manifest, '--ledger', A.ledger]);
+    const before = readFileSync(A.ledger, 'utf8');
+
+    const r = runCli(['log', '--manifest', B.manifest, '--ledger', A.ledger,
+      '--target', 'api.example.com', '--action', 'recon', '--at', AT]);
+
+    assert.equal(r.code, 1, `应拒绝追加，实际退出码 ${r.code}`);
+    assert.match(r.stderr, /日志属于另一次委托/);
+    assert.match(r.stderr, /ENG-OTHER-999/, '应指出当前凭证的编号');
+    assert.equal(readFileSync(A.ledger, 'utf8'), before, '被拒时日志不得被改动');
+  } finally {
+    A.cleanup();
+    B.cleanup();
+  }
+});
+
+check('B7 已混入的其它委托记录会被检出（检测）', () => {
+  const S = makeEngagement('b7');
+  try {
+    runCli(['init', '--manifest', S.manifest, '--ledger', S.ledger]);
+
+    /* 模拟日志被合并、或由旧版本 / 外部工具写入的情形 */
+    appendEntry(S.ledger, {
+      seq: 0, type: 'action', actor: 'someone', action: 'scan', target: 'other.example.com',
+      decision: 'allowed', result: 'merged', timestamp: '2026-09-14T00:00:00.000Z',
+      engagementId: 'ENG-OTHER',
+    });
+
+    /* 链本身是完整的 —— 这正是该检查存在的理由 */
+    const verify = runCli(['verify', '--ledger', S.ledger]);
+    assert.equal(verify.code, 3, `verify 应报归属异常，实际退出码 ${verify.code}`);
+    assert.match(verify.stdout, /委托归属异常/);
+
+    const report = runCli(['report', '--manifest', S.manifest, '--ledger', S.ledger, '--stdout']);
+    assert.equal(report.code, 3);
+    assert.match(report.stdout, /### 5\.1 ⚠️ 委托归属异常/);
+    assert.match(report.stdout, /ENG-OTHER/);
+    assert.match(report.stdout, /不可直接交付客户/);
   } finally {
     S.cleanup();
   }

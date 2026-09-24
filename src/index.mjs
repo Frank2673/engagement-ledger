@@ -21,7 +21,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
 import { loadManifest, verifyAuthorizationDocument, NEVER_PERMITTED_ACTIONS } from './lib/manifest.mjs';
 import { evaluateAction } from './lib/gate.mjs';
-import { loadLedger, appendEntry, verifyLedger, anchorInfo, makeEntry } from './lib/ledger.mjs';
+import { loadLedger, appendEntry, verifyLedger, anchorInfo, makeEntry, checkEngagementConsistency } from './lib/ledger.mjs';
 import { buildReport, buildJsonReport, summarizeLedger } from './lib/report.mjs';
 import { fileSha256 } from './lib/crypto.mjs';
 
@@ -216,6 +216,21 @@ function cmdLog({ manifestPath, ledgerPath, options }) {
     return EXIT.ERROR;
   }
 
+  /* 预防优于检测：不要往属于另一次委托的日志里追加记录。
+     共用日志路径会让报告的统计与流水把两件事写成一件 —— 而报告是要交给客户的。 */
+  const existing = loadLedgerOrExit(ledgerPath);
+  if (!existing) return EXIT.ERROR;
+  const genesis = existing.find((e) => e.type === 'genesis');
+  if (genesis?.engagementId && String(genesis.engagementId) !== manifest.engagement.id) {
+    fail(
+      `日志属于另一次委托，拒绝追加。\n` +
+        `     日志建立于：${genesis.engagementId}\n` +
+        `     当前凭证是：${manifest.engagement.id}\n` +
+        `     请为该委托单独指定 --ledger，不要与另一次委托共用日志文件。`
+    );
+    return EXIT.ERROR;
+  }
+
   const verdict = evaluateAction(manifest, {
     target: options.target,
     action: options.action,
@@ -287,6 +302,30 @@ function cmdVerify({ manifestPath, ledgerPath, options }) {
       process.stdout.write(`  [${String(d.seq).padStart(3)}] ${d.timestamp}  ${d.summary}\n`);
     }
     process.stdout.write(`\n提示：链完整只说明"内容没被改"。要覆盖"整份重算替换"，请运行 anchor 并把结果提交进 git。\n`);
+
+    /* 链完整不等于这些记录都属于同一次委托。
+       期望的委托编号：优先取凭证；没给凭证就回落到 genesis 记录自己的声明 ——
+       这样即使只校验日志本身，也能发现"里面混了别人的记录"。 */
+    const expectedId = manifestPath && existsSync(manifestPath)
+      ? loadManifestOrExit(manifestPath)?.engagement?.id
+      : entries.find((e) => e.type === 'genesis')?.engagementId;
+
+    if (expectedId) {
+      const consistency = checkEngagementConsistency(expectedId, entries);
+      if (!consistency.ok) {
+        process.stdout.write(
+          `\n⚠️  委托归属异常：${consistency.foreign.length} 条记录属于别的委托（本委托 ${consistency.expected}）。\n`
+        );
+        for (const f of consistency.foreign.slice(0, 5)) {
+          process.stdout.write(`     [${f.seq}] ${f.action || f.type} → ${f.target || '—'}（属于 ${f.engagementId}）\n`);
+        }
+        process.stdout.write(`   链本身完整，但这些记录不属于本次委托的证据范围。\n`);
+        return EXIT.INTEGRITY;
+      }
+      if (consistency.untagged.length) {
+        process.stdout.write(`\n提示：${consistency.untagged.length} 条记录未标注委托编号，无法自动确认归属。\n`);
+      }
+    }
     return EXIT.OK;
   }
 
@@ -323,6 +362,15 @@ function cmdReport({ manifestPath, ledgerPath, options }) {
   const verification = verifyLedger(entries, { hmacKey });
   if (!verification.ok) {
     process.stdout.write(`\n⚠️  注意：日志哈希链校验失败，报告中的完整性一节已标注。\n`);
+    return EXIT.INTEGRITY;
+  }
+
+  const consistency = checkEngagementConsistency(manifest.engagement.id, entries);
+  if (!consistency.ok) {
+    process.stdout.write(
+      `\n⚠️  注意：${consistency.foreign.length} 条记录属于别的委托，报告第 5.1 节已标注。\n` +
+        `   统计数字与动作流水包含了不属于本次委托的内容，纠正前不要交付客户。\n`
+    );
     return EXIT.INTEGRITY;
   }
   return EXIT.OK;
@@ -389,8 +437,21 @@ function cmdStatus({ manifestPath, ledgerPath, options }) {
   process.stdout.write(`  文件　　：${ledgerPath}\n`);
   process.stdout.write(`  记录条数：${stats.total}（允许 ${stats.decisions.allowed} / 拒绝 ${stats.decisions.denied}）\n`);
   process.stdout.write(`  链完整性：${verification.ok ? '✅ 完整' : `❌ 断裂于第 ${verification.brokenAt} 条`}\n`);
+
+  const consistency = checkEngagementConsistency(eng.id, entries);
+  process.stdout.write(
+    `  委托归属：${consistency.ok ? '✅ 一致' : `❌ ${consistency.foreign.length} 条属于别的委托`}\n`
+  );
   process.stdout.write(`  涉及目标：${stats.targetsTouched.length} 个\n`);
   process.stdout.write(`  最近记录：${stats.lastTimestamp || '（无）'}\n`);
+
+  if (stats.timeline.length) {
+    process.stdout.write(`\n最近动作（流水见 report）\n\n`);
+    for (const a of stats.timeline.slice(-5)) {
+      const what = a.type === 'note' ? '（备注）' : a.action;
+      process.stdout.write(`  [${a.seq}] ${a.timestamp}  ${what} → ${a.target || '—'}${a.result ? `（${a.result}）` : ''}\n`);
+    }
+  }
 
   if (stats.deniedActions.length) {
     process.stdout.write(`\n被拒绝的尝试（纪律证据）\n\n`);
@@ -399,7 +460,12 @@ function cmdStatus({ manifestPath, ledgerPath, options }) {
     }
   }
 
-  return verification.ok && active ? EXIT.OK : EXIT.INTEGRITY;
+  if (!consistency.ok) {
+    process.stdout.write(`\n⚠️  日志里混有别的委托的记录，报告会把它标在第 5.1 节。\n`);
+    process.stdout.write(`   确认是否与另一次委托共用了日志文件。\n`);
+  }
+
+  return verification.ok && consistency.ok && active ? EXIT.OK : EXIT.INTEGRITY;
 }
 
 /* ============================ 输出与工具 ============================ */

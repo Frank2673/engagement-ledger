@@ -11,11 +11,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { main } from '../src/index.mjs';
 import { fileSha256 } from '../src/lib/crypto.mjs';
+import { appendEntry } from '../src/lib/ledger.mjs';
 
 const AUTH_DOC = '授权书内容（测试用）\n';
 
 /** 造一个隔离的委托目录 */
-function sandbox() {
+function sandbox(engId = 'ENG-001') {
   const dir = mkdtempSync(join(tmpdir(), 'el-cli-'));
   const authPath = join(dir, 'authorization.txt');
   writeFileSync(authPath, AUTH_DOC, 'utf8');
@@ -25,7 +26,7 @@ function sandbox() {
     manifestPath,
     JSON.stringify({
       engagement: {
-        id: 'ENG-001',
+        id: engId,
         name: '测试委托',
         tester: 'alice',
         authorization: {
@@ -525,6 +526,103 @@ test('刚发生的动作不算补录（不误标）', () => {
     assert.ok(!stdout.includes('补录记录'));
     const logged = JSON.parse(readFileSync(sb.ledgerPath, 'utf8').trim().split('\n')[1]);
     assert.equal(logged.backfilled, undefined);
+  } finally {
+    sb.cleanup();
+  }
+});
+
+/* ------------------------- 委托归属 ------------------------- */
+
+test('log 拒绝向属于另一次委托的日志追加记录', () => {
+  const a = sandbox('ENG-AAA');
+  const b = sandbox('ENG-BBB');
+  try {
+    run(['init', '--manifest', a.manifestPath, '--ledger', a.ledgerPath]);
+
+    const r = run(['log', '--manifest', b.manifestPath, '--ledger', a.ledgerPath,
+      '--target', 'example.com', '--action', 'scan', '--at', AT]);
+
+    assert.equal(r.code, 1, '应拒绝追加');
+    assert.match(r.stderr, /日志属于另一次委托/);
+    assert.match(r.stderr, /ENG-AAA/, '应指出日志实际所属');
+    assert.match(r.stderr, /ENG-BBB/, '应指出当前凭证');
+    /* 关键：被拒时日志未被改动 */
+    assert.equal(readFileSync(a.ledgerPath, 'utf8').trim().split('\n').length, 1);
+  } finally {
+    a.cleanup();
+    b.cleanup();
+  }
+});
+
+test('report 检出已混入的其它委托记录（第 5.1 节）并返回 3', () => {
+  const a = sandbox('ENG-AAA');
+  try {
+    run(['init', '--manifest', a.manifestPath, '--ledger', a.ledgerPath]);
+
+    /* 模拟日志被合并 / 由旧版本写入的情形：直接追加一条属于别的委托的记录 */
+    appendEntry(a.ledgerPath, {
+      seq: 0, type: 'action', actor: 'someone', action: 'scan', target: 'other.example.com',
+      decision: 'allowed', result: 'merged', timestamp: '2026-09-14T00:00:00.000Z',
+      engagementId: 'ENG-OTHER',
+    });
+
+    /* 链本身是完整的 —— 这正是这个检查存在的理由 */
+    assert.equal(run(['verify', '--ledger', a.ledgerPath]).code, 3, 'verify 应报归属异常');
+
+    const r = run(['report', '--manifest', a.manifestPath, '--ledger', a.ledgerPath, '--stdout']);
+    assert.equal(r.code, 3);
+    assert.match(r.stdout, /委托归属异常/);
+    assert.match(r.stdout, /ENG-OTHER/);
+    assert.match(r.stdout, /不属于本次委托的证据范围/);
+    assert.match(r.stdout, /不可直接交付客户/);
+  } finally {
+    a.cleanup();
+  }
+});
+
+test('status 显示委托归属并给出处理提示', () => {
+  const a = sandbox('ENG-AAA');
+  try {
+    run(['init', '--manifest', a.manifestPath, '--ledger', a.ledgerPath]);
+    appendEntry(a.ledgerPath, {
+      seq: 0, type: 'action', actor: 'x', action: 'scan', target: 'other.com',
+      decision: 'allowed', timestamp: '2026-09-14T00:00:00.000Z', engagementId: 'ENG-OTHER',
+    });
+
+    const r = run(['status', '--manifest', a.manifestPath, '--ledger', a.ledgerPath]);
+    assert.equal(r.code, 3);
+    assert.match(r.stdout, /委托归属：❌/);
+    assert.match(r.stdout, /混有别的委托的记录/);
+  } finally {
+    a.cleanup();
+  }
+});
+
+test('归属一致时 status/report/verify 都正常通过', () => {
+  const sb = sandbox();
+  try {
+    run(['init', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath]);
+    run(['log', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath,
+      '--target', 'example.com', '--action', 'scan', '--at', AT]);
+
+    assert.equal(run(['verify', '--ledger', sb.ledgerPath, '--manifest', sb.manifestPath]).code, 0);
+    assert.equal(run(['status', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath]).code, 0);
+    assert.equal(run(['report', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath, '--stdout']).code, 0);
+  } finally {
+    sb.cleanup();
+  }
+});
+
+test('status 列出最近动作（流水入口）', () => {
+  const sb = sandbox();
+  try {
+    run(['init', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath]);
+    run(['log', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath,
+      '--target', 'example.com', '--action', 'scan', '--result', '3 findings', '--at', AT]);
+
+    const r = run(['status', '--manifest', sb.manifestPath, '--ledger', sb.ledgerPath]);
+    assert.match(r.stdout, /最近动作/);
+    assert.match(r.stdout, /scan → example\.com（3 findings）/);
   } finally {
     sb.cleanup();
   }

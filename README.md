@@ -10,7 +10,7 @@
 
 [![CI](https://github.com/Frank2673/engagement-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/Frank2673/engagement-ledger/actions/workflows/ci.yml)
 ![零依赖](https://img.shields.io/badge/运行时依赖-0-brightgreen)
-![测试](https://img.shields.io/badge/测试-172%20passed-brightgreen)
+![测试](https://img.shields.io/badge/测试-188%20passed-brightgreen)
 ![Node](https://img.shields.io/badge/node-%3E%3D20-blue)
 
 ---
@@ -277,6 +277,7 @@ node src/index.mjs verify --ledger ledger.jsonl --hmac-key-env ENGAGEMENT_LEDGER
    - **3.2 动作流水** —— 按写入顺序列出全部已执行动作与人工备注
 4. **越界尝试与被拒记录** —— 单独成表，**这是纪律的证据**
 5. **日志完整性** —— 链校验结论 + 链头哈希
+   - **5.1 委托归属异常** —— 日志里混进了别的委托的记录时出现（见下）
 6. **外部锚定** —— 为什么要锚定、锚定行、如何操作
 7. **边界声明** —— 三项能力限制，不做过度承诺
 
@@ -303,6 +304,29 @@ node src/index.mjs verify --ledger ledger.jsonl --hmac-key-env ENGAGEMENT_LEDGER
 
 配合 `--json` 还能产出机器可读版本，供 CI 或客户的合规系统消费。
 
+### 链完整 ≠ 这些记录都属于这次委托
+
+哈希链能证明「内容没被改」，但证明不了「这些内容都是这次委托的」。真实场景：
+
+- 两次委托共用了同一个 `--ledger` 路径
+- 交接时把两份日志合并了
+- 旧版本或外部工具往同一个文件里追加过
+
+这时报告的统计数字与动作流水会把两件事写成一件 —— 而报告是要交给客户的。
+所以本工具做两层处理：
+
+| 层 | 位置 | 行为 |
+| --- | --- | --- |
+| **预防** | `log` | 日志建立时的委托编号与当前凭证不符 → 拒绝追加，明确指出两个编号 |
+| **检测** | `verify` / `status` / `report` | 检出已混入的记录 → 报告第 5.1 节列表、退出码 3、提示"不可直接交付客户" |
+
+`verify` 不给 `--manifest` 时会回落到 genesis 记录自述的编号，所以只校验日志本身
+也能发现混入。
+
+**这个检查的能力边界**：它保证「已记录的内容在委托归属上自洽」，
+但发现不了「真的在两个目标上做了事却只在日志里写了一个委托」——
+那属于工具之外的行为（见 [`SECURITY.md`](SECURITY.md) §1.3）。
+
 ---
 
 ## 项目结构
@@ -314,9 +338,9 @@ src/
     crypto.mjs           确定性 JSON 序列化 + 哈希 + HMAC
     manifest.mjs         授权凭证校验、范围规则、IPv4/IPv6 CIDR 匹配、硬性禁止清单
     gate.mjs             执行前校验门（7 项判定 + 完整轨迹）
-    ledger.mjs           哈希链日志：追加、校验、锚定信息
+    ledger.mjs           哈希链日志：追加、校验、锚定信息、委托归属校验
     report.mjs           合规报告（Markdown + JSON）
-tests/                   172 个测试，7 个文件
+tests/                   188 个测试，7 个文件
 scripts/
   verify.mjs                  运营级校验：本地与 CI 跑同一份代码（28 项）
   check-zero-deps.mjs         零依赖 + 安全红线校验（CI 强制）
@@ -355,9 +379,10 @@ node tests/cli.test.mjs                     # 单跑某个文件
 - CLI 端到端：init 重复初始化被拒、check 不写日志、越界退出码 2、篡改退出码 3
 - IPv6：`::` 压缩、内嵌 IPv4、`[方括号]`、跨族不匹配、非法地址拒绝
 - "写错的 IP 不能掉进域名分支"是单独一条测试 —— 静默接受错误范围比报错危险得多
+- 委托归属：预防（`log` 拒绝跨委托追加）与检测（混入记录被检出并定位）两个方向
 - 输入加固：目标名含 `|` 时报告表格不被撑破，由 `check-report-tables.mjs` 校验
 
-`scripts/verify.mjs` 是运营级校验，四组共 28 项：端到端闭环、篡改检测、
+`scripts/verify.mjs` 是运营级校验，四组共 32 项：端到端闭环、篡改检测与归属、
 授权凭证守卫、安全红线。它的设计本身值得说一句 ——
 
 ### 为什么校验逻辑不写在 workflow 的 bash 里
