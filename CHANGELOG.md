@@ -7,6 +7,24 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-25
+
+文档与元数据一致性修复，不改任何运行时行为。
+
+### 修复
+
+- `LICENSE` 署名 `Frank` → `Frank2673`，与其余仓库对齐
+- `SECURITY.md` 引用的 CI 作业 `tamper-detection` **实际不存在**（workflow 只有 `test` / `verify`）
+  → 改指向 `scripts/verify.mjs` 的 B 组
+- `pull_request_template.md` 从仓库根移到 `.github/`：GitHub 只识别
+  `.github/pull_request_template.md` 或根目录全大写的 `PULL_REQUEST_TEMPLATE.md`，
+  原位置等于没有 PR 模板（用 `git mv` 保留历史）
+
+### 文档
+
+- README 补 license 徽章，顺序对齐另两仓（CI → License → 零依赖 → 测试 → Node）
+- README 许可段补 `© 2026 Frank2673`
+
 ## [0.1.0] - 2026-09-24
 
 首个版本。核心主张：**技术能力不稀缺，可验证的授权与留痕才是稀缺的**。
