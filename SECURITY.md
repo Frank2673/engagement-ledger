@@ -5,7 +5,7 @@
 因此这里逐条列出攻击者能做什么、本工具能发现什么、以及**发现不了什么**。
 
 诚信声明：下面「能发现」的每一条都在 `tests/ledger.test.mjs` 与
-`.github/workflows/ci.yml` 的 `tamper-detection` 作业里有对应的负向验证；
+`scripts/verify.mjs` 的 B 组（篡改检测负向验证：改内容 / 删记录 / HMAC）里有对应的验证；
 「不能发现」的每一条也都写了为什么，而不是含糊带过。
 
 ---

@@ -9,6 +9,7 @@
 ```
 
 [![CI](https://github.com/Frank2673/engagement-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/Frank2673/engagement-ledger/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![零依赖](https://img.shields.io/badge/运行时依赖-0-brightgreen)
 ![测试](https://img.shields.io/badge/测试-255%20passed-brightgreen)
 ![Node](https://img.shields.io/badge/node-%3E%3D20-blue)
@@ -545,4 +546,4 @@ CI 本身因此薄到只剩两条命令：`node --test tests/` 与 `node scripts
 
 ## 许可
 
-[MIT](LICENSE)
+[MIT](LICENSE) © 2026 Frank2673
